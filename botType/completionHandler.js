@@ -5,6 +5,17 @@ import { PassThrough } from "stream";
 import { log } from '../config/logger.js';
 import { logApiCall, generateId, getFileExtension, getFileType } from "./utils.js";
 
+const sessionMap = new Map();
+
+function getSessionKey(req) {
+  return (
+    req.headers["x-session-id"] ||
+    req.body.user ||
+    req.headers["authorization"] ||
+    "default"
+  );
+}
+
 // 上传文件到 Dify，获取文件 ID
 async function uploadFileToDify(base64Data, config, userId) {
   try {
@@ -87,6 +98,8 @@ async function uploadFileToDify(base64Data, config, userId) {
 async function handleRequest(req, res, config, requestId, startTime) {
   try {
     const apiPath = "/completion-messages";
+    const sessionKey = getSessionKey(req);
+    const existingConversationId = sessionMap.get(sessionKey) || "";
     const data = req.body;
     const messages = data.messages;
     let queryString = "";
@@ -178,6 +191,7 @@ async function handleRequest(req, res, config, requestId, startTime) {
     requestBody = {
       inputs: { [inputKey]: queryString },
       response_mode: "streaming",
+      conversation_id: existingConversationId,
       user: userId,
       files: files,
     };
@@ -232,6 +246,9 @@ async function handleRequest(req, res, config, requestId, startTime) {
     if (stream) {
       res.setHeader("Content-Type", "text/event-stream");
       let buffer = "";
+      let fullText = "";
+      let usage = null;
+      let conversationIdFromResp = null;
       const responseStream = resp.body
         .pipe(new PassThrough())
         .on("data", (chunk) => {
@@ -261,6 +278,10 @@ async function handleRequest(req, res, config, requestId, startTime) {
               chunkObj,
             });
 
+            if (chunkObj.conversation_id) {
+              conversationIdFromResp = chunkObj.conversation_id;
+            }
+
             if (
               chunkObj.event === "message" ||
               chunkObj.event === "agent_message" ||
@@ -274,6 +295,7 @@ async function handleRequest(req, res, config, requestId, startTime) {
               }
 
               if (chunkContent !== "") {
+                fullText += chunkContent;
                 const chunkId = `chatcmpl-${Date.now()}`;
                 const chunkCreated = chunkObj.created_at;
 
@@ -299,12 +321,19 @@ async function handleRequest(req, res, config, requestId, startTime) {
                   );
                 }
               }
-            } else if (
-              chunkObj.event === "workflow_finished" ||
-              chunkObj.event === "message_end"
-            ) {
+            } else if (chunkObj.event === "message_end") {
               const chunkId = `chatcmpl-${Date.now()}`;
               const chunkCreated = chunkObj.created_at;
+              usage = chunkObj.metadata?.usage || null;
+              if (conversationIdFromResp) {
+                sessionMap.set(sessionKey, conversationIdFromResp);
+              }
+              log("info", "流式响应完成", {
+                requestId,
+                conversationId: conversationIdFromResp,
+                usage,
+                contentLength: fullText.length,
+              });
               if (!isResponseEnded) {
                 res.write(
                   "data: " +
@@ -320,6 +349,7 @@ async function handleRequest(req, res, config, requestId, startTime) {
                           finish_reason: "stop",
                         },
                       ],
+                      usage,
                     }) +
                     "\n\n"
                 );
@@ -360,7 +390,8 @@ async function handleRequest(req, res, config, requestId, startTime) {
       });
     } else {
       let result = "";
-      let usageData = "";
+      let usageData = null;
+      let conversationId = null;
       let buffer = "";
       let hasError = false;
 
@@ -403,11 +434,14 @@ async function handleRequest(req, res, config, requestId, startTime) {
           ) {
             result += chunkObj.answer;
           } else if (chunkObj.event === "message_end") {
+            if (chunkObj.conversation_id) {
+              sessionMap.set(sessionKey, chunkObj.conversation_id);
+              conversationId = chunkObj.conversation_id;
+            }
             usageData = {
-              prompt_tokens: chunkObj.metadata.usage.prompt_tokens || 100,
-              completion_tokens:
-                chunkObj.metadata.usage.completion_tokens || 10,
-              total_tokens: chunkObj.metadata.usage.total_tokens || 110,
+              prompt_tokens: chunkObj.metadata?.usage?.prompt_tokens,
+              completion_tokens: chunkObj.metadata?.usage?.completion_tokens,
+              total_tokens: chunkObj.metadata?.usage?.total_tokens,
             };
           } else if (chunkObj.event === "workflow_finished") {
             const outputs = chunkObj.data.outputs;
@@ -468,6 +502,11 @@ async function handleRequest(req, res, config, requestId, startTime) {
           log("info", "发送响应", {
             requestId,
             response: formattedResponse,
+            responseSummary: {
+              conversationId,
+              usage: usageData,
+              contentLength: result.trim().length,
+            },
           });
 
           res.set("Content-Type", "application/json");
