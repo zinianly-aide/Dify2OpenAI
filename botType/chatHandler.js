@@ -71,6 +71,62 @@ function updateSessionState(sessionKey, conversationId, usage) {
   return nextState;
 }
 
+function extractTextContent(content) {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (content?.type === "text") {
+    return content.text || "";
+  }
+
+  return "";
+}
+
+function sanitizeClineTextBlock(text) {
+  const trimmedText = text.trim();
+
+  if (!trimmedText) {
+    return "";
+  }
+
+  if (trimmedText.startsWith("# task_progress RECOMMENDED")) {
+    return "";
+  }
+
+  if (trimmedText.startsWith("<environment_details>")) {
+    return "";
+  }
+
+  if (
+    trimmedText.startsWith(
+      "[ERROR] You did not use a tool in your previous response!"
+    )
+  ) {
+    return "";
+  }
+
+  return trimmedText;
+}
+
+function extractSystemPrompt(messages) {
+  const systemMessage = messages.find((message) => message.role === "system");
+
+  if (!systemMessage) {
+    return "";
+  }
+
+  if (Array.isArray(systemMessage.content)) {
+    return systemMessage.content
+      .map((content) => extractTextContent(content))
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+  }
+
+  return String(systemMessage.content || "").trim();
+}
+
 // 上传文件到 Dify 并获取文件 ID
 async function uploadFileToDify(base64Data, config, userId) {
   try {
@@ -210,49 +266,43 @@ async function handleRequest(req, res, config, requestId, startTime) {
       }
     }
     
+    const systemPrompt = extractSystemPrompt(messages);
+
     // 第二步：从最后一条消息中提取查询文本
+    const shouldFilterClineMeta = Boolean(existingConversationId);
+
     if (Array.isArray(lastMessage.content)) {
       for (const content of lastMessage.content) {
-        // 处理字符串类型的内容（OpenAI格式）
-        if (typeof content === "string") {
-          queryString += content + "\n";
-        } 
-        // 处理对象类型的内容
-        else if (content.type === "text") {
-          queryString += content.text + "\n";
+        const rawTextContent = extractTextContent(content);
+        const textContent = shouldFilterClineMeta
+          ? sanitizeClineTextBlock(rawTextContent)
+          : rawTextContent;
+        if (textContent) {
+          queryString += textContent + "\n";
         }
-        // 注意：这里不再重复处理image_url，因为已经在上面处理过了
       }
       queryString = queryString.trim(); // 去除末尾的换行符
     } else {
-      queryString = lastMessage.content;
+      const rawQueryString = String(lastMessage.content || "");
+      queryString = shouldFilterClineMeta
+        ? sanitizeClineTextBlock(rawQueryString)
+        : rawQueryString;
     }
 
-    // 构建对话历史，不包括最后一条消息
-    const history = messages
-      .slice(0, -1)
-      .map((message) => {
-        // 处理可能为数组的消息内容
-        let contentText = "";
-        if (Array.isArray(message.content)) {
-          for (const content of message.content) {
-            if (content.type === "text") {
-              contentText += content.text + "\n";
-            }
-            // 注意：如果需要，可以不同地处理 'image_url'
-          }
-          contentText = contentText.trim();
-        } else {
-          contentText = message.content;
-        }
-        return `${message.role}: ${contentText}`;
-      })
-      .join("\n");
-
-    // 如果存在历史记录，将其包含在 queryString 中
-    if (history) {
-      queryString = `Here is our talk history:\n'''\n${history}\n'''\n\nHere is my question:\n${queryString}`;
+    if (!existingConversationId && systemPrompt) {
+      queryString = queryString
+        ? `${systemPrompt}\n\n---\n\n${queryString}`
+        : systemPrompt;
     }
+
+    log("info", "使用 conversation_id 维持上下文，不再拼接历史消息", {
+      requestId,
+      hasConversationId: Boolean(existingConversationId),
+      messageCount: messages.length,
+      queryLength: queryString.length,
+      includedSystemPrompt: !existingConversationId && Boolean(systemPrompt),
+      filteredClineMeta: shouldFilterClineMeta,
+    });
 
     // 记录消息处理
     log("info", "处理 Chat 类型消息", {
