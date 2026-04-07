@@ -18,6 +18,59 @@ function getSessionKey(req) {
   );
 }
 
+function normalizeUsage(usage) {
+  return {
+    prompt_tokens: Number(usage?.prompt_tokens || 0),
+    completion_tokens: Number(usage?.completion_tokens || 0),
+    total_tokens: Number(usage?.total_tokens || 0),
+  };
+}
+
+function mergeUsage(currentUsage, newUsage) {
+  const current = normalizeUsage(currentUsage);
+  const next = normalizeUsage(newUsage);
+
+  return {
+    prompt_tokens: current.prompt_tokens + next.prompt_tokens,
+    completion_tokens: current.completion_tokens + next.completion_tokens,
+    total_tokens: current.total_tokens + next.total_tokens,
+  };
+}
+
+function getSessionState(sessionKey) {
+  const sessionState = sessionMap.get(sessionKey);
+
+  if (!sessionState) {
+    return {
+      conversationId: "",
+      cumulativeUsage: normalizeUsage(),
+    };
+  }
+
+  if (typeof sessionState === "string") {
+    return {
+      conversationId: sessionState,
+      cumulativeUsage: normalizeUsage(),
+    };
+  }
+
+  return {
+    conversationId: sessionState.conversationId || "",
+    cumulativeUsage: normalizeUsage(sessionState.cumulativeUsage),
+  };
+}
+
+function updateSessionState(sessionKey, conversationId, usage) {
+  const previousState = getSessionState(sessionKey);
+  const nextState = {
+    conversationId: conversationId || previousState.conversationId || "",
+    cumulativeUsage: mergeUsage(previousState.cumulativeUsage, usage),
+  };
+
+  sessionMap.set(sessionKey, nextState);
+  return nextState;
+}
+
 // 上传文件到 Dify 并获取文件 ID
 async function uploadFileToDify(base64Data, config, userId) {
   try {
@@ -101,7 +154,7 @@ async function handleRequest(req, res, config, requestId, startTime) {
   try {
     const apiPath = "/chat-messages";
     const sessionKey = getSessionKey(req);
-    const existingConversationId = sessionMap.get(sessionKey) || "";
+    const { conversationId: existingConversationId } = getSessionState(sessionKey);
     const data = req.body;
     const messages = data.messages;
     let queryString = "";
@@ -353,13 +406,19 @@ async function handleRequest(req, res, config, requestId, startTime) {
               const chunkId = `chatcmpl-${Date.now()}`;
               const chunkCreated = chunkObj.created_at;
               usage = chunkObj.metadata?.usage || null;
+              let updatedSessionState = null;
               if (conversationIdFromResp) {
-                sessionMap.set(sessionKey, conversationIdFromResp);
+                updatedSessionState = updateSessionState(
+                  sessionKey,
+                  conversationIdFromResp,
+                  usage
+                );
               }
               log("info", "流式响应完成", {
                 requestId,
                 conversationId: conversationIdFromResp,
                 usage,
+                cumulativeUsage: updatedSessionState?.cumulativeUsage,
                 contentLength: fullText.length,
               });
               if (!isResponseEnded) {
@@ -377,7 +436,7 @@ async function handleRequest(req, res, config, requestId, startTime) {
                           finish_reason: "stop",
                         },
                       ],
-                      usage,
+                      usage: updatedSessionState?.cumulativeUsage || usage,
                     }) +
                     "\n\n"
                 );
@@ -419,6 +478,7 @@ async function handleRequest(req, res, config, requestId, startTime) {
     } else {
       let result = "";
       let usageData = null;
+      let responseUsage = null;
       let conversationId = null;
       let buffer = "";
       let hasError = false;
@@ -462,8 +522,8 @@ async function handleRequest(req, res, config, requestId, startTime) {
           ) {
             result += chunkObj.answer;
           } else if (chunkObj.event === "message_end") {
+            let updatedSessionState = null;
             if (chunkObj.conversation_id) {
-              sessionMap.set(sessionKey, chunkObj.conversation_id);
               conversationId = chunkObj.conversation_id;
             }
             usageData = {
@@ -471,6 +531,24 @@ async function handleRequest(req, res, config, requestId, startTime) {
               completion_tokens: chunkObj.metadata?.usage?.completion_tokens,
               total_tokens: chunkObj.metadata?.usage?.total_tokens,
             };
+            if (conversationId) {
+              updatedSessionState = updateSessionState(
+                sessionKey,
+                conversationId,
+                usageData
+              );
+            }
+            if (updatedSessionState) {
+              responseUsage = updatedSessionState.cumulativeUsage;
+              log("info", "累计 usage 已更新", {
+                requestId,
+                conversationId,
+                usage: usageData,
+                cumulativeUsage: updatedSessionState.cumulativeUsage,
+              });
+            } else {
+              responseUsage = usageData;
+            }
           } else if (chunkObj.event === "workflow_finished") {
             const outputs = chunkObj.data.outputs;
             if (config.OUTPUT_VARIABLE) {
@@ -485,6 +563,7 @@ async function handleRequest(req, res, config, requestId, startTime) {
                 chunkObj.metadata?.usage?.completion_tokens || 10,
               total_tokens: chunkObj.data.total_tokens || 110,
             };
+            responseUsage = usageData;
           } else if (chunkObj.event === "agent_thought") {
             // 如果需要，处理 agent_thought 事件
           } else if (chunkObj.event === "ping") {
@@ -521,7 +600,7 @@ async function handleRequest(req, res, config, requestId, startTime) {
                 finish_reason: "stop",
               },
             ],
-            usage: usageData,
+            usage: responseUsage || usageData,
             system_fingerprint: "fp_2f57f81c11",
           };
           const jsonResponse = JSON.stringify(formattedResponse, null, 2);
@@ -533,6 +612,7 @@ async function handleRequest(req, res, config, requestId, startTime) {
             responseSummary: {
               conversationId,
               usage: usageData,
+              returnedUsage: responseUsage || usageData,
               contentLength: result.trim().length,
             },
           });
