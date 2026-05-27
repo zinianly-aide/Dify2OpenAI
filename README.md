@@ -244,6 +244,27 @@ Authorization: Bearer https://cloud.dify.ai/v1|app-xxxx|Chat|||stateless
 
 `stateful` 模式不会额外压缩历史消息，继续依赖 Dify `conversation_id` 维持上下文。
 
+可选调参方式：
+
+1. 请求头：
+
+```bash
+X-Context-Recent-Messages: 8
+X-Context-Tool-Max-Chars: 2400
+```
+
+2. 扩展配置追加第 7、8 段：
+
+```bash
+Authorization: Bearer https://cloud.dify.ai/v1|app-xxxx|Chat|||stateless|8|2400
+```
+
+或：
+
+```json
+"model": "dify|Chat|https://cloud.dify.ai/v1|||stateless|8|2400"
+```
+
 ### Opencode 提示词建议
 
 将下面这段系统提示词配置到 Opencode，可显著提高工具调用稳定性：

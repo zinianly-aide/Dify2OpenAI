@@ -258,6 +258,16 @@ function clipText(text, maxLength) {
   };
 }
 
+function parsePositiveInt(value, fallbackValue) {
+  const parsedValue = Number.parseInt(value, 10);
+
+  if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
+    return fallbackValue;
+  }
+
+  return parsedValue;
+}
+
 function getMessageText(message, { filterClineMeta = false } = {}) {
   let text = "";
 
@@ -310,7 +320,14 @@ function serializeMessageForDify(
       segments.push(`assistant_tool_calls:\n${toolCallsText}`);
     }
 
-    return segments.join("\n\n").trim();
+    return {
+      text: segments.join("\n\n").trim(),
+      meta: {
+        truncated: false,
+        originalLength: rawContentText.length,
+        role: message.role,
+      },
+    };
   }
 
   if (message.role === "tool" || message.role === "function") {
@@ -354,7 +371,13 @@ function buildStatelessChatQuery(messages) {
   return serializedMessages.join("\n\n");
 }
 
-function buildCompressedStatelessChatQuery(messages) {
+function buildCompressedStatelessChatQuery(
+  messages,
+  {
+    recentConversationLimit = 6,
+    toolOutputMaxChars = 1800,
+  } = {}
+) {
   const nonSystemMessages = messages.filter((message) => message.role !== "system");
   const recentToolChain = [];
   let index = nonSystemMessages.length - 1;
@@ -379,7 +402,7 @@ function buildCompressedStatelessChatQuery(messages) {
   }
 
   const earlierMessages = nonSystemMessages.slice(0, index + 1);
-  const recentConversation = earlierMessages.slice(-6);
+  const recentConversation = earlierMessages.slice(-recentConversationLimit);
   const omittedCount = Math.max(
     earlierMessages.length - recentConversation.length,
     0
@@ -410,9 +433,45 @@ function buildCompressedStatelessChatQuery(messages) {
 
   const recentToolChainText = recentToolChain
     .map((message) => {
-      const { text, meta } = serializeMessageForDify(message, {
-        clipToolOutput: true,
-      });
+      const rawContentText = getMessageText(message);
+      const clippedToolText = clipText(rawContentText, toolOutputMaxChars);
+      const isToolRole =
+        message.role === "tool" || message.role === "function";
+      const toolName = message.name || message.tool_call_id || "tool";
+      let text = "";
+      let meta = {
+        truncated: false,
+        originalLength: rawContentText.length,
+      };
+
+      if (
+        message.role === "assistant" &&
+        Array.isArray(message.tool_calls) &&
+        message.tool_calls.length > 0
+      ) {
+        const toolCallsText = serializeAssistantToolCalls(message.tool_calls);
+        const segments = [];
+
+        if (rawContentText) {
+          segments.push(`assistant: ${rawContentText}`);
+        }
+
+        if (toolCallsText) {
+          segments.push(`assistant_tool_calls:\n${toolCallsText}`);
+        }
+
+        text = segments.join("\n\n").trim();
+      } else if (isToolRole) {
+        text = clippedToolText.text
+          ? `tool (${toolName}): ${clippedToolText.text}`
+          : "";
+        meta = {
+          truncated: clippedToolText.truncated,
+          originalLength: clippedToolText.originalLength,
+        };
+      } else {
+        text = rawContentText ? `${message.role}: ${rawContentText}` : "";
+      }
 
       if (meta?.truncated) {
         truncatedToolMessageCount += 1;
@@ -435,11 +494,16 @@ function buildCompressedStatelessChatQuery(messages) {
       keptRecentConversationCount: recentConversation.length,
       keptToolChainCount: recentToolChain.length,
       truncatedToolMessageCount,
+      recentConversationLimit,
+      toolOutputMaxChars,
     },
   };
 }
 
-function buildStatefulToolQuery(messages) {
+function buildStatefulToolQuery(
+  messages,
+  { toolOutputMaxChars = 1800 } = {}
+) {
   const tailMessages = [];
   let index = messages.length - 1;
 
@@ -461,9 +525,19 @@ function buildStatefulToolQuery(messages) {
   }
 
   const serializedMessages = tailMessages
-    .map((message) =>
-      serializeMessageForDify(message, { clipToolOutput: true }).text
-    )
+    .map((message) => {
+      if (message.role === "tool" || message.role === "function") {
+        const rawContentText = getMessageText(message);
+        const clippedToolText = clipText(rawContentText, toolOutputMaxChars);
+        const toolName = message.name || message.tool_call_id || "tool";
+
+        return clippedToolText.text
+          ? `tool (${toolName}): ${clippedToolText.text}`
+          : "";
+      }
+
+      return serializeMessageForDify(message, { clipToolOutput: true }).text;
+    })
     .filter(Boolean);
 
   if (serializedMessages.length === 0) {
@@ -483,6 +557,19 @@ function getContextMode(req, config) {
   ).toLowerCase();
 
   return contextMode === "stateless" ? "stateless" : "stateful";
+}
+
+function getCompressionConfig(req, config) {
+  return {
+    recentConversationLimit: parsePositiveInt(
+      req.headers["x-context-recent-messages"] || config.CONTEXT_RECENT_MESSAGES,
+      6
+    ),
+    toolOutputMaxChars: parsePositiveInt(
+      req.headers["x-context-tool-max-chars"] || config.CONTEXT_TOOL_MAX_CHARS,
+      1800
+    ),
+  };
 }
 
 // 上传文件到 Dify 并获取文件 ID
@@ -570,6 +657,7 @@ async function handleRequest(req, res, config, requestId, startTime) {
     const sessionKey = getSessionKey(req);
     const data = req.body;
     const contextMode = getContextMode(req, config);
+    const compressionConfig = getCompressionConfig(req, config);
     // 支持客户端通过 conversation_id 传入来恢复会话，否则从 sessionMap 获取
     const clientConversationId = data.conversation_id || "";
     const { conversationId: storedConversationId } = getSessionState(sessionKey);
@@ -661,11 +749,14 @@ async function handleRequest(req, res, config, requestId, startTime) {
       lastMessageRole === "tool" || lastMessageRole === "function";
 
     if (contextMode === "stateless") {
-      const compressedContext = buildCompressedStatelessChatQuery(messages);
+      const compressedContext = buildCompressedStatelessChatQuery(
+        messages,
+        compressionConfig
+      );
       queryString = compressedContext.query;
       compressionMeta = compressedContext.meta;
     } else if (isToolFollowup) {
-      queryString = buildStatefulToolQuery(messages);
+      queryString = buildStatefulToolQuery(messages, compressionConfig);
     } else {
       queryString = getMessageText(lastMessage, {
         filterClineMeta: shouldFilterClineMeta,
@@ -698,6 +789,7 @@ async function handleRequest(req, res, config, requestId, startTime) {
       hasToolMessages,
       shouldAdaptToolCalls,
       isToolFollowup,
+      compressionConfig,
       compressionMeta,
       includedSystemPrompt:
         (contextMode === "stateless" || !existingConversationId) &&
