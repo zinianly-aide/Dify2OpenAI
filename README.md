@@ -196,6 +196,84 @@ Authorization: Bearer https://cloud.dify.ai/v1
 "model": "dify|app-xxxx|Chat"
 ```
 
+### 上下文模式
+
+支持两种上下文模式：
+
+- `stateful`：默认模式。使用 Dify `conversation_id` 持续对话，适合普通聊天。
+- `stateless`：禁用 Dify 会话持久化，由请求中的 `messages` 自己提供上下文，适合 Coding Agent，避免 OpenAI 消息历史和 Dify 会话历史双重叠加。
+
+可通过以下两种方式启用：
+
+1. 请求头传递：
+
+```bash
+X-Context-Mode: stateless
+```
+
+2. 在扩展配置中追加第 6 段：
+
+```bash
+Authorization: Bearer https://cloud.dify.ai/v1|app-xxxx|Chat|||stateless
+```
+
+或：
+
+```json
+"model": "dify|Chat|https://cloud.dify.ai/v1|||stateless"
+```
+
+### Tool Calls 兼容
+
+`Chat` 模式支持基础的 OpenAI `tool_calls` 兼容：
+
+- 请求中的 `tools` 会被转换为提示信息发送给 Dify
+- 请求中的 `assistant.tool_calls` 与 `tool` 消息会被序列化进下一轮 query
+- Dify 的 `agent_thought` 会在响应中转换为 OpenAI `tool_calls`
+
+当前实现是兼容层适配，不是 Dify 原生动态工具注册。
+
+### 上下文压缩
+
+`stateless` 模式下内置了轻量上下文压缩，适合 Coding Agent：
+
+- 保留全部 `system` 提示
+- 保留最近 6 条普通对话消息
+- 保留最近 1 组工具调用链（`assistant.tool_calls` + `tool` 结果）
+- 过长的工具结果会自动裁剪，只保留头尾关键内容
+
+`stateful` 模式不会额外压缩历史消息，继续依赖 Dify `conversation_id` 维持上下文。
+
+### Opencode 提示词建议
+
+将下面这段系统提示词配置到 Opencode，可显著提高工具调用稳定性：
+
+```txt
+You are a coding agent connected to external tools.
+
+Tool-use policy:
+- If the task requires reading files, searching code, running commands, checking logs, or verifying behavior, call a tool instead of guessing.
+- Do not describe a tool call in prose. Emit a tool call directly.
+- Before making code changes, inspect the relevant files first.
+- After making code changes, run verification commands when possible.
+- If a tool result is insufficient, call another tool. Do not fabricate missing information.
+- Prefer the smallest sufficient tool call.
+- For codebase search, prefer ripgrep-style search.
+- For log inspection, search first, then open only the relevant section.
+- If the user asks for latest/runtime/current state, verify with tools before answering.
+
+Coding workflow:
+- First inspect, then edit, then verify.
+- Preserve existing structure unless the user explicitly asks for a refactor.
+- Make minimal invasive changes.
+- Never assume a file's content without reading it.
+
+Response policy:
+- When a tool is needed, respond with tool_calls.
+- When the answer is ready, respond concisely with the result.
+- Do not repeat long tool outputs verbatim. Summarize the important lines.
+```
+
 ---
 
 ## 开发指南

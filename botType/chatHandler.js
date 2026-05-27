@@ -127,6 +127,364 @@ function extractSystemPrompt(messages) {
   return String(systemMessage.content || "").trim();
 }
 
+function safeParseJsonString(value) {
+  if (!value || typeof value !== "string") {
+    return null;
+  }
+
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    return null;
+  }
+}
+
+function extractToolCallsFromAgentThought(agentThought, toolCallStartIndex = 0) {
+  if (!agentThought?.tool) {
+    return [];
+  }
+
+  const toolNames = String(agentThought.tool)
+    .split(";")
+    .map((name) => name.trim())
+    .filter(Boolean);
+
+  if (toolNames.length === 0) {
+    return [];
+  }
+
+  const parsedToolInput = safeParseJsonString(agentThought.tool_input);
+
+  return toolNames.map((toolName, offset) => {
+    const toolArguments =
+      parsedToolInput && typeof parsedToolInput === "object"
+        ? parsedToolInput[toolName] ?? parsedToolInput
+        : {};
+
+    return {
+      index: toolCallStartIndex + offset,
+      id: `call_${agentThought.id || generateId()}_${offset}`,
+      type: "function",
+      function: {
+        name: toolName,
+        arguments: JSON.stringify(toolArguments || {}),
+      },
+    };
+  });
+}
+
+function extractToolInstructions(tools) {
+  if (!Array.isArray(tools) || tools.length === 0) {
+    return "";
+  }
+
+  const serializedTools = tools
+    .map((tool) => {
+      const functionDef = tool?.function;
+
+      if (!functionDef?.name) {
+        return "";
+      }
+
+      const segments = [`name: ${functionDef.name}`];
+
+      if (functionDef.description) {
+        segments.push(`description: ${functionDef.description}`);
+      }
+
+      if (functionDef.parameters) {
+        segments.push(
+          `parameters: ${JSON.stringify(functionDef.parameters)}`
+        );
+      }
+
+      return segments.join("\n");
+    })
+    .filter(Boolean);
+
+  if (serializedTools.length === 0) {
+    return "";
+  }
+
+  return [
+    "Available tools:",
+    serializedTools.map((toolText) => `- ${toolText}`).join("\n"),
+    "When a tool is required, respond with a tool call that matches one of the available tools.",
+  ].join("\n");
+}
+
+function serializeAssistantToolCalls(toolCalls) {
+  if (!Array.isArray(toolCalls) || toolCalls.length === 0) {
+    return "";
+  }
+
+  return toolCalls
+    .map((toolCall) => {
+      const functionName = toolCall?.function?.name || "unknown_tool";
+      const functionArguments = toolCall?.function?.arguments || "{}";
+
+      return [
+        `tool_call_id: ${toolCall.id || generateId()}`,
+        `tool_name: ${functionName}`,
+        `tool_arguments: ${functionArguments}`,
+      ].join("\n");
+    })
+    .join("\n\n");
+}
+
+function clipText(text, maxLength) {
+  const normalizedText = String(text || "").trim();
+
+  if (!normalizedText || normalizedText.length <= maxLength) {
+    return {
+      text: normalizedText,
+      truncated: false,
+      originalLength: normalizedText.length,
+    };
+  }
+
+  const headLength = Math.max(Math.floor(maxLength * 0.65), 200);
+  const tailLength = Math.max(maxLength - headLength, 80);
+  const clippedText = [
+    normalizedText.slice(0, headLength).trimEnd(),
+    `[truncated ${normalizedText.length - maxLength} chars]`,
+    normalizedText.slice(-tailLength).trimStart(),
+  ].join("\n...\n");
+
+  return {
+    text: clippedText,
+    truncated: true,
+    originalLength: normalizedText.length,
+  };
+}
+
+function getMessageText(message, { filterClineMeta = false } = {}) {
+  let text = "";
+
+  if (Array.isArray(message.content)) {
+    for (const content of message.content) {
+      const rawTextContent = extractTextContent(content);
+      const textContent = filterClineMeta
+        ? sanitizeClineTextBlock(rawTextContent)
+        : rawTextContent;
+
+      if (textContent) {
+        text += `${textContent}\n`;
+      }
+    }
+    return text.trim();
+  }
+
+  const rawTextContent = String(message.content || "");
+  return filterClineMeta
+    ? sanitizeClineTextBlock(rawTextContent)
+    : rawTextContent.trim();
+}
+
+function serializeMessageForDify(
+  message,
+  { filterClineMeta = false, clipToolOutput = false } = {}
+) {
+  const rawContentText = getMessageText(message, { filterClineMeta });
+  const isToolRole =
+    message.role === "tool" || message.role === "function";
+  const contentMeta =
+    clipToolOutput && isToolRole
+      ? clipText(rawContentText, 1800)
+      : {
+          text: rawContentText,
+          truncated: false,
+          originalLength: rawContentText.length,
+        };
+  const contentText = contentMeta.text;
+
+  if (message.role === "assistant" && Array.isArray(message.tool_calls)) {
+    const toolCallsText = serializeAssistantToolCalls(message.tool_calls);
+    const segments = [];
+
+    if (contentText) {
+      segments.push(`assistant: ${contentText}`);
+    }
+
+    if (toolCallsText) {
+      segments.push(`assistant_tool_calls:\n${toolCallsText}`);
+    }
+
+    return segments.join("\n\n").trim();
+  }
+
+  if (message.role === "tool" || message.role === "function") {
+    const toolName = message.name || message.tool_call_id || "tool";
+    return {
+      text: contentText ? `tool (${toolName}): ${contentText}` : "",
+      meta: {
+        truncated: contentMeta.truncated,
+        originalLength: contentMeta.originalLength,
+        role: message.role,
+      },
+    };
+  }
+
+  return {
+    text: contentText ? `${message.role}: ${contentText}` : "",
+    meta: {
+      truncated: contentMeta.truncated,
+      originalLength: contentMeta.originalLength,
+      role: message.role,
+    },
+  };
+}
+
+function buildStatelessChatQuery(messages) {
+  const serializedMessages = messages
+    .filter((message) => message.role !== "system")
+    .map((message) => {
+      const { text: contentText } = serializeMessageForDify(message, {
+        filterClineMeta: message.role === "user",
+      });
+
+      if (!contentText) {
+        return "";
+      }
+
+      return `${message.role}: ${contentText}`;
+    })
+    .filter(Boolean);
+
+  return serializedMessages.join("\n\n");
+}
+
+function buildCompressedStatelessChatQuery(messages) {
+  const nonSystemMessages = messages.filter((message) => message.role !== "system");
+  const recentToolChain = [];
+  let index = nonSystemMessages.length - 1;
+
+  while (
+    index >= 0 &&
+    (nonSystemMessages[index].role === "tool" ||
+      nonSystemMessages[index].role === "function")
+  ) {
+    recentToolChain.unshift(nonSystemMessages[index]);
+    index -= 1;
+  }
+
+  if (
+    index >= 0 &&
+    nonSystemMessages[index].role === "assistant" &&
+    Array.isArray(nonSystemMessages[index].tool_calls) &&
+    nonSystemMessages[index].tool_calls.length > 0
+  ) {
+    recentToolChain.unshift(nonSystemMessages[index]);
+    index -= 1;
+  }
+
+  const earlierMessages = nonSystemMessages.slice(0, index + 1);
+  const recentConversation = earlierMessages.slice(-6);
+  const omittedCount = Math.max(
+    earlierMessages.length - recentConversation.length,
+    0
+  );
+  const sections = [];
+  let truncatedToolMessageCount = 0;
+
+  if (omittedCount > 0) {
+    sections.push(
+      `[context compressed: omitted ${omittedCount} older non-system messages]`
+    );
+  }
+
+  const recentConversationText = recentConversation
+    .map((message) => {
+      const { text } = serializeMessageForDify(message, {
+        filterClineMeta: message.role === "user",
+      });
+
+      return text;
+    })
+    .filter(Boolean)
+    .join("\n\n");
+
+  if (recentConversationText) {
+    sections.push(`Recent conversation:\n${recentConversationText}`);
+  }
+
+  const recentToolChainText = recentToolChain
+    .map((message) => {
+      const { text, meta } = serializeMessageForDify(message, {
+        clipToolOutput: true,
+      });
+
+      if (meta?.truncated) {
+        truncatedToolMessageCount += 1;
+      }
+
+      return text;
+    })
+    .filter(Boolean)
+    .join("\n\n");
+
+  if (recentToolChainText) {
+    sections.push(`Latest tool interaction:\n${recentToolChainText}`);
+  }
+
+  return {
+    query: sections.join("\n\n"),
+    meta: {
+      originalMessageCount: nonSystemMessages.length,
+      omittedMessageCount: omittedCount,
+      keptRecentConversationCount: recentConversation.length,
+      keptToolChainCount: recentToolChain.length,
+      truncatedToolMessageCount,
+    },
+  };
+}
+
+function buildStatefulToolQuery(messages) {
+  const tailMessages = [];
+  let index = messages.length - 1;
+
+  while (
+    index >= 0 &&
+    (messages[index].role === "tool" || messages[index].role === "function")
+  ) {
+    tailMessages.unshift(messages[index]);
+    index -= 1;
+  }
+
+  if (
+    index >= 0 &&
+    messages[index].role === "assistant" &&
+    Array.isArray(messages[index].tool_calls) &&
+    messages[index].tool_calls.length > 0
+  ) {
+    tailMessages.unshift(messages[index]);
+  }
+
+  const serializedMessages = tailMessages
+    .map((message) =>
+      serializeMessageForDify(message, { clipToolOutput: true }).text
+    )
+    .filter(Boolean);
+
+  if (serializedMessages.length === 0) {
+    return "";
+  }
+
+  return [
+    ...serializedMessages,
+    "Please continue based on the tool call context and tool results above.",
+  ].join("\n\n");
+}
+
+function getContextMode(req, config) {
+  const headerContextMode = req.headers["x-context-mode"];
+  const contextMode = String(
+    headerContextMode || config.CONTEXT_MODE || "stateful"
+  ).toLowerCase();
+
+  return contextMode === "stateless" ? "stateless" : "stateful";
+}
+
 // 上传文件到 Dify 并获取文件 ID
 async function uploadFileToDify(base64Data, config, userId) {
   try {
@@ -210,8 +568,22 @@ async function handleRequest(req, res, config, requestId, startTime) {
   try {
     const apiPath = "/chat-messages";
     const sessionKey = getSessionKey(req);
-    const { conversationId: existingConversationId } = getSessionState(sessionKey);
     const data = req.body;
+    const contextMode = getContextMode(req, config);
+    // 支持客户端通过 conversation_id 传入来恢复会话，否则从 sessionMap 获取
+    const clientConversationId = data.conversation_id || "";
+    const { conversationId: storedConversationId } = getSessionState(sessionKey);
+    const existingConversationId =
+      contextMode === "stateful"
+        ? clientConversationId || storedConversationId
+        : "";
+    // 客户端传入 conversation_id 时同步更新 sessionMap
+    if (contextMode === "stateful" && clientConversationId) {
+      sessionMap.set(sessionKey, {
+        conversationId: clientConversationId,
+        cumulativeUsage: normalizeUsage(),
+      });
+    }
     const messages = data.messages;
     let queryString = "";
     let files = [];
@@ -267,41 +639,71 @@ async function handleRequest(req, res, config, requestId, startTime) {
     }
     
     const systemPrompt = extractSystemPrompt(messages);
+    const hasRequestedTools = Array.isArray(data.tools) && data.tools.length > 0;
+    const hasToolMessages = messages.some(
+      (message) =>
+        message.role === "tool" ||
+        message.role === "function" ||
+        (message.role === "assistant" &&
+          Array.isArray(message.tool_calls) &&
+          message.tool_calls.length > 0)
+    );
+    const shouldAdaptToolCalls = hasRequestedTools || hasToolMessages;
+    const toolInstructions = shouldAdaptToolCalls
+      ? extractToolInstructions(data.tools)
+      : "";
+    let compressionMeta = null;
 
-    // 第二步：从最后一条消息中提取查询文本
+    // 第二步：根据上下文模式提取 query
     const shouldFilterClineMeta = Boolean(existingConversationId);
+    const lastMessageRole = lastMessage?.role || "";
+    const isToolFollowup =
+      lastMessageRole === "tool" || lastMessageRole === "function";
 
-    if (Array.isArray(lastMessage.content)) {
-      for (const content of lastMessage.content) {
-        const rawTextContent = extractTextContent(content);
-        const textContent = shouldFilterClineMeta
-          ? sanitizeClineTextBlock(rawTextContent)
-          : rawTextContent;
-        if (textContent) {
-          queryString += textContent + "\n";
-        }
-      }
-      queryString = queryString.trim(); // 去除末尾的换行符
+    if (contextMode === "stateless") {
+      const compressedContext = buildCompressedStatelessChatQuery(messages);
+      queryString = compressedContext.query;
+      compressionMeta = compressedContext.meta;
+    } else if (isToolFollowup) {
+      queryString = buildStatefulToolQuery(messages);
     } else {
-      const rawQueryString = String(lastMessage.content || "");
-      queryString = shouldFilterClineMeta
-        ? sanitizeClineTextBlock(rawQueryString)
-        : rawQueryString;
+      queryString = getMessageText(lastMessage, {
+        filterClineMeta: shouldFilterClineMeta,
+      });
     }
 
-    if (!existingConversationId && systemPrompt) {
-      queryString = queryString
-        ? `${systemPrompt}\n\n---\n\n${queryString}`
-        : systemPrompt;
+    const promptSections = [];
+
+    if ((contextMode === "stateless" || !existingConversationId) && systemPrompt) {
+      promptSections.push(systemPrompt);
     }
 
-    log("info", "使用 conversation_id 维持上下文，不再拼接历史消息", {
+    if (toolInstructions) {
+      promptSections.push(toolInstructions);
+    }
+
+    if (queryString) {
+      promptSections.push(queryString);
+    }
+
+    queryString = promptSections.join("\n\n---\n\n");
+
+    log("info", "上下文策略已应用", {
       requestId,
+      contextMode,
       hasConversationId: Boolean(existingConversationId),
       messageCount: messages.length,
       queryLength: queryString.length,
-      includedSystemPrompt: !existingConversationId && Boolean(systemPrompt),
-      filteredClineMeta: shouldFilterClineMeta,
+      hasOpenAITools: hasRequestedTools,
+      hasToolMessages,
+      shouldAdaptToolCalls,
+      isToolFollowup,
+      compressionMeta,
+      includedSystemPrompt:
+        (contextMode === "stateless" || !existingConversationId) &&
+        Boolean(systemPrompt),
+      filteredClineMeta:
+        contextMode === "stateless" ? true : shouldFilterClineMeta,
     });
 
     // 记录消息处理
@@ -321,7 +723,7 @@ async function handleRequest(req, res, config, requestId, startTime) {
       inputs: {},
       query: queryString,
       response_mode: "streaming",
-      conversation_id: existingConversationId,
+      conversation_id: contextMode === "stateful" ? existingConversationId : "",
       user: userId, // 确保一致的 'user' 标识符
       auto_generate_name: false,
       files: files,
@@ -380,6 +782,9 @@ async function handleRequest(req, res, config, requestId, startTime) {
       let fullText = "";
       let usage = null;
       let conversationIdFromResp = null;
+      let toolCallCount = 0;
+      let hasToolCalls = false;
+      const emittedAgentThoughtIds = new Set();
       const responseStream = resp.body
         .pipe(new PassThrough())
         .on("data", (chunk) => {
@@ -456,8 +861,10 @@ async function handleRequest(req, res, config, requestId, startTime) {
               const chunkId = `chatcmpl-${Date.now()}`;
               const chunkCreated = chunkObj.created_at;
               usage = chunkObj.metadata?.usage || null;
+              const finishReason =
+                hasToolCalls && !fullText.trim() ? "tool_calls" : "stop";
               let updatedSessionState = null;
-              if (conversationIdFromResp) {
+              if (contextMode === "stateful" && conversationIdFromResp) {
                 updatedSessionState = updateSessionState(
                   sessionKey,
                   conversationIdFromResp,
@@ -483,11 +890,23 @@ async function handleRequest(req, res, config, requestId, startTime) {
                         {
                           index: 0,
                           delta: {},
-                          finish_reason: "stop",
+                          finish_reason: finishReason,
                         },
                       ],
                       usage: updatedSessionState?.cumulativeUsage || usage,
                     }) +
+                    "\n\n"
+                );
+              }
+              // 返回 conversation_id 给客户端
+              if (
+                contextMode === "stateful" &&
+                !isResponseEnded &&
+                conversationIdFromResp
+              ) {
+                res.write(
+                  "data: " +
+                    JSON.stringify({ conversation_id: conversationIdFromResp }) +
                     "\n\n"
                 );
               }
@@ -498,7 +917,44 @@ async function handleRequest(req, res, config, requestId, startTime) {
               res.end();
               isResponseEnded = true;
             } else if (chunkObj.event === "agent_thought") {
-              // 如果需要，处理 agent_thought 事件
+              if (
+                shouldAdaptToolCalls &&
+                !emittedAgentThoughtIds.has(chunkObj.id) &&
+                chunkObj.tool
+              ) {
+                const toolCalls = extractToolCallsFromAgentThought(
+                  chunkObj,
+                  toolCallCount
+                );
+
+                if (toolCalls.length > 0 && !isResponseEnded) {
+                  emittedAgentThoughtIds.add(chunkObj.id);
+                  toolCallCount += toolCalls.length;
+                  hasToolCalls = true;
+                  const chunkId = `chatcmpl-${Date.now()}`;
+                  const chunkCreated = chunkObj.created_at;
+
+                  res.write(
+                    "data: " +
+                      JSON.stringify({
+                        id: chunkId,
+                        object: "chat.completion.chunk",
+                        created: chunkCreated,
+                        model: data.model,
+                        choices: [
+                          {
+                            index: 0,
+                            delta: {
+                              tool_calls: toolCalls,
+                            },
+                            finish_reason: null,
+                          },
+                        ],
+                      }) +
+                      "\n\n"
+                  );
+                }
+              }
             } else if (chunkObj.event === "ping") {
               // 如果需要，处理 ping 事件
             } else if (chunkObj.event === "error") {
@@ -530,6 +986,9 @@ async function handleRequest(req, res, config, requestId, startTime) {
       let usageData = null;
       let responseUsage = null;
       let conversationId = null;
+      let toolCallCount = 0;
+      const collectedToolCalls = [];
+      const collectedAgentThoughtIds = new Set();
       let buffer = "";
       let hasError = false;
 
@@ -581,7 +1040,7 @@ async function handleRequest(req, res, config, requestId, startTime) {
               completion_tokens: chunkObj.metadata?.usage?.completion_tokens,
               total_tokens: chunkObj.metadata?.usage?.total_tokens,
             };
-            if (conversationId) {
+            if (contextMode === "stateful" && conversationId) {
               updatedSessionState = updateSessionState(
                 sessionKey,
                 conversationId,
@@ -615,7 +1074,21 @@ async function handleRequest(req, res, config, requestId, startTime) {
             };
             responseUsage = usageData;
           } else if (chunkObj.event === "agent_thought") {
-            // 如果需要，处理 agent_thought 事件
+            if (
+              shouldAdaptToolCalls &&
+              !collectedAgentThoughtIds.has(chunkObj.id) &&
+              chunkObj.tool
+            ) {
+              const toolCalls = extractToolCallsFromAgentThought(
+                chunkObj,
+                toolCallCount
+              );
+              if (toolCalls.length > 0) {
+                collectedAgentThoughtIds.add(chunkObj.id);
+                toolCallCount += toolCalls.length;
+                collectedToolCalls.push(...toolCalls);
+              }
+            }
           } else if (chunkObj.event === "ping") {
             // 如果需要，处理 ping 事件
           } else if (chunkObj.event === "error") {
@@ -634,6 +1107,10 @@ async function handleRequest(req, res, config, requestId, startTime) {
             .status(500)
             .json({ error: "An error occurred while processing the request." });
         } else {
+          const hasToolCalls = collectedToolCalls.length > 0;
+          const trimmedResult = result.trim();
+          const finishReason =
+            hasToolCalls && !trimmedResult ? "tool_calls" : "stop";
           const formattedResponse = {
             id: `chatcmpl-${generateId()}`,
             object: "chat.completion",
@@ -644,15 +1121,22 @@ async function handleRequest(req, res, config, requestId, startTime) {
                 index: 0,
                 message: {
                   role: "assistant",
-                  content: result.trim(),
+                  content: trimmedResult || null,
+                  ...(collectedToolCalls.length > 0
+                    ? { tool_calls: collectedToolCalls }
+                    : {}),
                 },
                 logprobs: null,
-                finish_reason: "stop",
+                finish_reason: finishReason,
               },
             ],
             usage: responseUsage || usageData,
             system_fingerprint: "fp_2f57f81c11",
           };
+          // 返回 conversation_id 给客户端
+          if (contextMode === "stateful" && conversationId) {
+            formattedResponse.conversation_id = conversationId;
+          }
           const jsonResponse = JSON.stringify(formattedResponse, null, 2);
 
           // 记录发送的响应
@@ -663,7 +1147,9 @@ async function handleRequest(req, res, config, requestId, startTime) {
               conversationId,
               usage: usageData,
               returnedUsage: responseUsage || usageData,
-              contentLength: result.trim().length,
+              contentLength: trimmedResult.length,
+              toolCallCount: collectedToolCalls.length,
+              finishReason,
             },
           });
 

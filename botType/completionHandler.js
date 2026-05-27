@@ -69,6 +69,15 @@ function updateSessionState(sessionKey, conversationId, usage) {
   return nextState;
 }
 
+function getContextMode(req, config) {
+  const headerContextMode = req.headers["x-context-mode"];
+  const contextMode = String(
+    headerContextMode || config.CONTEXT_MODE || "stateful"
+  ).toLowerCase();
+
+  return contextMode === "stateless" ? "stateless" : "stateful";
+}
+
 // 上传文件到 Dify，获取文件 ID
 async function uploadFileToDify(base64Data, config, userId) {
   try {
@@ -152,8 +161,22 @@ async function handleRequest(req, res, config, requestId, startTime) {
   try {
     const apiPath = "/completion-messages";
     const sessionKey = getSessionKey(req);
-    const { conversationId: existingConversationId } = getSessionState(sessionKey);
     const data = req.body;
+    const contextMode = getContextMode(req, config);
+    // 支持客户端通过 conversation_id 传入来恢复会话，否则从 sessionMap 获取
+    const clientConversationId = data.conversation_id || "";
+    const { conversationId: storedConversationId } = getSessionState(sessionKey);
+    const existingConversationId =
+      contextMode === "stateful"
+        ? clientConversationId || storedConversationId
+        : "";
+    // 客户端传入 conversation_id 时同步更新 sessionMap
+    if (contextMode === "stateful" && clientConversationId) {
+      sessionMap.set(sessionKey, {
+        conversationId: clientConversationId,
+        cumulativeUsage: normalizeUsage(),
+      });
+    }
     const messages = data.messages;
     let queryString = "";
     let files = [];
@@ -229,6 +252,7 @@ async function handleRequest(req, res, config, requestId, startTime) {
     // 日志记录
     log("info", "处理 Completion 类型消息", {
       requestId,
+      contextMode,
       contentLength: queryString.length,
       queryString,
       files,
@@ -244,7 +268,7 @@ async function handleRequest(req, res, config, requestId, startTime) {
     requestBody = {
       inputs: { [inputKey]: queryString },
       response_mode: "streaming",
-      conversation_id: existingConversationId,
+      conversation_id: contextMode === "stateful" ? existingConversationId : "",
       user: userId,
       files: files,
     };
@@ -379,7 +403,7 @@ async function handleRequest(req, res, config, requestId, startTime) {
               const chunkCreated = chunkObj.created_at;
               usage = chunkObj.metadata?.usage || null;
               let updatedSessionState = null;
-              if (conversationIdFromResp) {
+              if (contextMode === "stateful" && conversationIdFromResp) {
                 updatedSessionState = updateSessionState(
                   sessionKey,
                   conversationIdFromResp,
@@ -410,6 +434,18 @@ async function handleRequest(req, res, config, requestId, startTime) {
                       ],
                       usage: updatedSessionState?.cumulativeUsage || usage,
                     }) +
+                    "\n\n"
+                );
+              }
+              // 返回 conversation_id 给客户端
+              if (
+                contextMode === "stateful" &&
+                !isResponseEnded &&
+                conversationIdFromResp
+              ) {
+                res.write(
+                  "data: " +
+                    JSON.stringify({ conversation_id: conversationIdFromResp }) +
                     "\n\n"
                 );
               }
@@ -503,7 +539,7 @@ async function handleRequest(req, res, config, requestId, startTime) {
               completion_tokens: chunkObj.metadata?.usage?.completion_tokens,
               total_tokens: chunkObj.metadata?.usage?.total_tokens,
             };
-            if (conversationId) {
+            if (contextMode === "stateful" && conversationId) {
               updatedSessionState = updateSessionState(
                 sessionKey,
                 conversationId,
@@ -575,6 +611,10 @@ async function handleRequest(req, res, config, requestId, startTime) {
             usage: responseUsage || usageData,
             system_fingerprint: "fp_2f57f81c11",
           };
+          // 返回 conversation_id 给客户端
+          if (conversationId) {
+            formattedResponse.conversation_id = conversationId;
+          }
           const jsonResponse = JSON.stringify(formattedResponse, null, 2);
 
           // 记录发送的响应
