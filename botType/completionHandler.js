@@ -437,18 +437,7 @@ async function handleRequest(req, res, config, requestId, startTime) {
                     "\n\n"
                 );
               }
-              // 返回 conversation_id 给客户端
-              if (
-                contextMode === "stateful" &&
-                !isResponseEnded &&
-                conversationIdFromResp
-              ) {
-                res.write(
-                  "data: " +
-                    JSON.stringify({ conversation_id: conversationIdFromResp }) +
-                    "\n\n"
-                );
-              }
+              // conversation_id 由服务端 sessionMap 管理，不需要返回给客户端
               if (!isResponseEnded) {
                 res.write("data: [DONE]\n\n");
               }

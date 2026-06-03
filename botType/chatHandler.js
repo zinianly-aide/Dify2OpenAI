@@ -572,6 +572,193 @@ function getCompressionConfig(req, config) {
   };
 }
 
+/**
+ * 从 Dify 文本响应中解析代码块，转换为 OpenAI tool_calls 格式
+ * 让 Dify Chat 应用的代码输出可以被 opencode 等客户端实际执行
+ */
+function extractCodeBlockToolCalls(text) {
+  if (!text) return { toolCalls: [], cleanText: text || "" };
+
+  const MAX_TOOL_CALLS = 20;
+  const toolCalls = [];
+  const seenCommands = new Set();
+  let cleanText = text;
+
+  // 匹配 ```language\n...\n``` 代码块
+  const codeBlockRegex = /```(\w+)\n([\s\S]*?)```/g;
+  let match;
+
+  while ((match = codeBlockRegex.exec(text)) !== null) {
+    if (toolCalls.length >= MAX_TOOL_CALLS) break;
+
+    const [fullMatch, language, codeContent] = match;
+    const trimmedCode = codeContent.trim();
+    if (!trimmedCode) continue;
+
+    const lang = language.toLowerCase();
+
+    // bash/shell 命令
+    if (["bash", "sh", "shell", "zsh"].includes(lang)) {
+      if (seenCommands.has(trimmedCode)) continue;
+      seenCommands.add(trimmedCode);
+
+      // --- 模式 1: cat > file << 'EOF' → write_file ---
+      const catMatch = matchCatToFile(trimmedCode);
+      if (catMatch) {
+        toolCalls.push(makeTool("write_file", {
+          path: catMatch.path,
+          content: catMatch.body,
+        }));
+      }
+      // --- 模式 2: echo "content" > file → write_file ---
+      else {
+        const echoMatch = matchEchoToFile(trimmedCode);
+        if (echoMatch) {
+          toolCalls.push(makeTool("write_file", {
+            path: echoMatch.path,
+            content: echoMatch.body,
+          }));
+        }
+        // --- 模式 3: find 命令 → glob ---
+        else {
+          const findMatch = matchFindToGlob(trimmedCode);
+          if (findMatch) {
+            toolCalls.push(makeTool("glob", findMatch));
+          }
+          // --- 兜底: 纯 bash 命令 ---
+          else {
+            toolCalls.push(makeTool("bash", { command: trimmedCode }));
+          }
+        }
+      }
+      cleanText = cleanText.replace(fullMatch, "").trim();
+    }
+
+    // java/scala/kotlin → write_file (如果模型在代码块第一行写文件路径)
+    // 通过检测代码块前的文字中的文件路径来推断
+  }
+
+  // --- 从文本中检测 skill 调用意图 ---
+  // 匹配模式: "use the X skill" / "使用 X skill" / "load X"
+  const skillNames = extractSkillReferences(cleanText);
+  for (const skillName of skillNames) {
+    if (toolCalls.length >= MAX_TOOL_CALLS) break;
+    // 避免重复 skill 调用
+    if (toolCalls.some(tc => tc.function.name === "skill" &&
+      JSON.parse(tc.function.arguments).name === skillName)) continue;
+    toolCalls.push(makeTool("skill", { name: skillName }));
+  }
+
+  return { toolCalls, cleanText: cleanText || "" };
+}
+
+/** 生成标准 tool_call 对象 */
+function makeTool(name, args) {
+  return {
+    id: `call_${generateId()}`,
+    type: "function",
+    function: { name, arguments: JSON.stringify(args) },
+  };
+}
+
+/** 匹配 cat > path << 'EOF' ... EOF 和 cat << 'EOF' > path ... EOF */
+function matchCatToFile(code) {
+  // 匹配两种顺序: cat > path << EOF 或 cat << EOF > path
+  const headerPatterns = [
+    /^cat\s+>\s*(\S+)\s+<<\s*'(EOF|END)'/m,       // cat > file << 'EOF'
+    /^cat\s+<<\s*'(EOF|END)'\s*>\s*(\S+)/m,        // cat << 'EOF' > file
+  ];
+  for (const hre of headerPatterns) {
+    const header = code.match(hre);
+    if (!header) continue;
+    // 两个正则的 group 顺序不同，统一提取
+    const [_, g1, g2] = header;
+    const isAltOrder = g1 === "EOF" || g1 === "END";
+    const filePath = isAltOrder ? g2 : g1;
+    const endMarker = isAltOrder ? g1 : g2;
+    const bodyStart = code.indexOf("\n", header.index) + 1;
+    const endRegex = new RegExp(`^${endMarker}$`, "m");
+    const remainder = code.slice(bodyStart);
+    const endMatch = endRegex.exec(remainder);
+    const body = (endMatch
+      ? remainder.slice(0, endMatch.index)
+      : remainder
+    ).trimEnd();
+    return body ? { path: filePath, body } : null;
+  }
+  return null;
+}
+
+/** 匹配 echo "content" > file 或 echo 'content' > file */
+function matchEchoToFile(code) {
+  // 单行 echo "content" > /path
+  const single = code.match(/^echo\s+["']([\s\S]*?)["']\s*>\s*(\S+)$/m);
+  if (single) return { path: single[2], body: single[1] };
+
+  // 多行 echo "line1\nline2" > /path  — 较少见，保持 bash
+  return null;
+}
+
+/** 匹配 find 命令转换为 glob 参数 */
+function matchFindToGlob(code) {
+  // find /path -name "*.java" → glob pattern="*.java" path="/path"
+  const findMatch = code.match(
+    /^find\s+(\S+)\s+-name\s+["'](\S+)["'](?:\s+-type\s+[fd])?/m
+  );
+  if (!findMatch) return null;
+  return {
+    pattern: findMatch[2],
+    path: findMatch[1],
+  };
+}
+
+/**
+ * 从响应文本中检测 skill 调用意图
+ * 匹配模式: "use the X skill", "使用 X skill", "load X", "call X"
+ * 仅在用户已安装的 skill 列表中匹配
+ */
+function extractSkillReferences(text) {
+  if (!text) return [];
+
+  // 已知 skill 列表 (安装自 .agents/skills/)
+  const KNOWN_SKILLS = [
+    "git-essentials", "code", "debug-pro", "find-skills",
+    "test-runner", "memory", "session-logs", "self-improving",
+    "architecture-designer", "security-auditor", "brainstorming",
+    "backtest-expert", "content-strategy", "copywriting",
+    "market-research", "seo", "blog-writer", "writing-plans",
+    "executing-plans", "frontend-design-3", "ui-ux-pro-max",
+    "ffmpeg-video-editor", "video-frames", "tmux", "autoglm-browser-agent",
+    "parallel-web-search", "parallel-deep-research", "desearch-web-search",
+    "clawdefender", "a-stock-analysis", "1password",
+  ];
+
+  const found = [];
+  const textLower = text.toLowerCase();
+  const skillRefPattern = /(?:use|load|call|invoke|run|用|使用|调用|加载|执行)\s+(?:the\s+)?([\w-]+)\s*(?:skill|工具|技能)/gi;
+  let m;
+  while ((m = skillRefPattern.exec(textLower)) !== null) {
+    const candidate = m[1].toLowerCase();
+    // 模糊匹配 skill 名
+    for (const skillName of KNOWN_SKILLS) {
+      if (skillName === candidate || skillName.includes(candidate) || candidate.includes(skillName)) {
+        if (!found.includes(skillName)) found.push(skillName);
+      }
+    }
+  }
+
+  // 中文格式: "使用 git-essentials 这个 skill"
+  const cnPattern = /使用\s*([\w-]+)\s*(?:skill|技能|工具)?/gi;
+  while ((m = cnPattern.exec(text)) !== null) {
+    const candidate = m[1].toLowerCase();
+    if (KNOWN_SKILLS.includes(candidate) && !found.includes(candidate)) {
+      found.push(candidate);
+    }
+  }
+
+  return found.slice(0, 5); // 最多 5 个
+}
+
 // 上传文件到 Dify 并获取文件 ID
 async function uploadFileToDify(base64Data, config, userId) {
   try {
@@ -769,6 +956,16 @@ async function handleRequest(req, res, config, requestId, startTime) {
       promptSections.push(systemPrompt);
     }
 
+    // 注入代码块输出指令：让 Dify Chat 以 ```bash 代码块输出可执行命令
+    if (contextMode === "stateless" || !existingConversationId) {
+      promptSections.push(
+        "当你需要执行命令或创建文件时，请用代码块输出可执行的命令。\n" +
+        "- shell/bash 命令请用 ```bash ... ``` 包裹\n" +
+        "- 每个命令单独一个代码块\n" +
+        "- 不要模拟执行，直接输出要运行的命令"
+      );
+    }
+
     if (toolInstructions) {
       promptSections.push(toolInstructions);
     }
@@ -953,8 +1150,45 @@ async function handleRequest(req, res, config, requestId, startTime) {
               const chunkId = `chatcmpl-${Date.now()}`;
               const chunkCreated = chunkObj.created_at;
               usage = chunkObj.metadata?.usage || null;
+
+              // 从积累文本中提取代码块作为 tool_calls（streaming 模式）
+              const {
+                toolCalls: codeBlockToolCalls,
+                cleanText: cleanedFullText,
+              } = extractCodeBlockToolCalls(fullText);
+              const hasCodeBlockToolCalls = codeBlockToolCalls.length > 0;
+
+              // 如果有代码块 tool_calls，先发出 tool_call delta 事件
+              if (hasCodeBlockToolCalls && !isResponseEnded) {
+                const toolCallDelta = {
+                  id: chunkId,
+                  object: "chat.completion.chunk",
+                  created: chunkCreated,
+                  model: data.model,
+                  choices: [
+                    {
+                      index: 0,
+                      delta: {
+                        tool_calls: codeBlockToolCalls.map((tc, i) => ({
+                          index: toolCallCount + i,
+                          id: tc.id,
+                          type: tc.type,
+                          function: tc.function,
+                        })),
+                      },
+                      finish_reason: null,
+                    },
+                  ],
+                };
+                res.write("data: " + JSON.stringify(toolCallDelta) + "\n\n");
+                toolCallCount += codeBlockToolCalls.length;
+              }
+
+              // finish_reason: 有 Agent tool_calls 或有代码块 tool_calls 时都是 tool_calls
               const finishReason =
-                hasToolCalls && !fullText.trim() ? "tool_calls" : "stop";
+                hasToolCalls || hasCodeBlockToolCalls
+                  ? "tool_calls"
+                  : "stop";
               let updatedSessionState = null;
               if (contextMode === "stateful" && conversationIdFromResp) {
                 updatedSessionState = updateSessionState(
@@ -990,18 +1224,7 @@ async function handleRequest(req, res, config, requestId, startTime) {
                     "\n\n"
                 );
               }
-              // 返回 conversation_id 给客户端
-              if (
-                contextMode === "stateful" &&
-                !isResponseEnded &&
-                conversationIdFromResp
-              ) {
-                res.write(
-                  "data: " +
-                    JSON.stringify({ conversation_id: conversationIdFromResp }) +
-                    "\n\n"
-                );
-              }
+              // conversation_id 由服务端 sessionMap 管理，不需要返回给客户端
               if (!isResponseEnded) {
                 res.write("data: [DONE]\n\n");
               }
@@ -1199,10 +1422,25 @@ async function handleRequest(req, res, config, requestId, startTime) {
             .status(500)
             .json({ error: "An error occurred while processing the request." });
         } else {
-          const hasToolCalls = collectedToolCalls.length > 0;
           const trimmedResult = result.trim();
+
+          // 从文本中提取代码块作为 tool_calls
+          const { toolCalls: codeBlockToolCalls, cleanText: cleanedResult } =
+            extractCodeBlockToolCalls(trimmedResult);
+          const hasCodeBlockToolCalls = codeBlockToolCalls.length > 0;
+          const allToolCalls = [
+            ...collectedToolCalls,
+            ...codeBlockToolCalls,
+          ];
+          const hasToolCalls = allToolCalls.length > 0;
+          // 清理 thinking 标签
+          const rawContent = hasCodeBlockToolCalls ? cleanedResult : trimmedResult;
+          const strippedContent = rawContent
+            ? rawContent.replace(/<think>[\s\S]*?<\/think>/g, "").trim()
+            : "";
+          const finalContent = strippedContent || null;
           const finishReason =
-            hasToolCalls && !trimmedResult ? "tool_calls" : "stop";
+            hasToolCalls ? "tool_calls" : "stop";
           const formattedResponse = {
             id: `chatcmpl-${generateId()}`,
             object: "chat.completion",
@@ -1213,9 +1451,9 @@ async function handleRequest(req, res, config, requestId, startTime) {
                 index: 0,
                 message: {
                   role: "assistant",
-                  content: trimmedResult || null,
-                  ...(collectedToolCalls.length > 0
-                    ? { tool_calls: collectedToolCalls }
+                  content: finalContent,
+                  ...(allToolCalls.length > 0
+                    ? { tool_calls: allToolCalls }
                     : {}),
                 },
                 logprobs: null,
@@ -1239,8 +1477,9 @@ async function handleRequest(req, res, config, requestId, startTime) {
               conversationId,
               usage: usageData,
               returnedUsage: responseUsage || usageData,
-              contentLength: trimmedResult.length,
-              toolCallCount: collectedToolCalls.length,
+              contentLength: finalContent ? finalContent.length : 0,
+              toolCallCount: allToolCalls.length,
+              hasCodeBlockToolCalls,
               finishReason,
             },
           });
