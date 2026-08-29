@@ -4,6 +4,11 @@ import fs from 'node:fs';
 const port = Number(process.env.DSH_PROBE_PORT || 39123);
 const output = process.env.DSH_PROBE_OUTPUT || '';
 const marker = 'DSH_PLUGIN_E2E_OK';
+const records = [];
+
+function persist() {
+  if (output) fs.writeFileSync(output, JSON.stringify(records, null, 2));
+}
 
 const server = http.createServer(async (req, res) => {
   if (req.method !== 'POST' || req.url !== '/v1/chat/completions') {
@@ -23,14 +28,19 @@ const server = http.createServer(async (req, res) => {
     headers: req.headers,
     body,
   };
-  if (output) fs.writeFileSync(output, JSON.stringify(record, null, 2));
+  records.push(record);
+  persist();
+
   console.log(`DSH_PROBE_REQUEST ${JSON.stringify({
+    index: records.length - 1,
     url: record.url,
     userAgent: record.headers['user-agent'] || null,
     hasTools: Array.isArray(body.tools) && body.tools.length > 0,
     toolCount: Array.isArray(body.tools) ? body.tools.length : 0,
     messageCount: Array.isArray(body.messages) ? body.messages.length : 0,
     bodyKeys: Object.keys(body).sort(),
+    candidateHeaderKeys: Object.keys(record.headers).filter((key) => /session|conversation|dsh|request|trace/i.test(key)).sort(),
+    candidateBodyKeys: Object.keys(body).filter((key) => /session|conversation|user|metadata|trace/i.test(key)).sort(),
   })}`);
 
   res.statusCode = 200;
