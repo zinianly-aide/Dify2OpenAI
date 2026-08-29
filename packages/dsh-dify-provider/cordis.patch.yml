@@ -1,0 +1,11 @@
+- insert:
+    - id: llm-dify
+      name: 'dsh-dify-provider'
+      config:
+        providerId: !!js process.env.DIFY_PROVIDER_ID || 'dify'
+        timeoutMs: !!js Number(process.env.DIFY_TIMEOUT || 120000)
+        apps:
+          - id: !!js process.env.DIFY_APP_ID || 'default'
+            name: !!js process.env.DIFY_MODEL_NAME || 'Dify'
+            baseURL: !!js process.env.DIFY_API_URL
+            apiKeyEnv: !!js process.env.DIFY_API_KEY_ENV || 'DIFY_API_KEY'
