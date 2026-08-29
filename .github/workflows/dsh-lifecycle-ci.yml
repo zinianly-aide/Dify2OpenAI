@@ -45,9 +45,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      DSH_HOME: ${{ runner.temp }}/dsh-home
+      DSH_HOME: /tmp/dsh-home
       DSH_PROBE_PORT: '39123'
-      DSH_PROBE_OUTPUT: ${{ runner.temp }}/dsh-probe-request.json
+      DSH_PROBE_OUTPUT: /tmp/dsh-probe-request.json
       DIFY2OPENAI_E2E_KEY: test-key
     steps:
       - name: Checkout
@@ -96,23 +96,23 @@ jobs:
       - name: Verify plugin is composed
         shell: bash
         run: |
-          npx -y @deepseek-ai/dsh@0.1.0-rc.7 --profile headless --dump-config > "$RUNNER_TEMP/dsh-config.txt"
-          grep -q "llm-custom" "$RUNNER_TEMP/dsh-config.txt"
-          grep -q "@linziyanleo/dsh-custom-provider" "$RUNNER_TEMP/dsh-config.txt"
+          npx -y @deepseek-ai/dsh@0.1.0-rc.7 --profile headless --dump-config > /tmp/dsh-config.txt
+          grep -q "llm-custom" /tmp/dsh-config.txt
+          grep -q "@linziyanleo/dsh-custom-provider" /tmp/dsh-config.txt
 
       - name: Start OpenAI-compatible probe
         shell: bash
         run: |
-          node scripts/dsh-openai-probe.mjs > "$RUNNER_TEMP/dsh-probe.log" 2>&1 &
-          echo $! > "$RUNNER_TEMP/dsh-probe.pid"
+          node scripts/dsh-openai-probe.mjs > /tmp/dsh-probe.log 2>&1 &
+          echo $! > /tmp/dsh-probe.pid
           for i in $(seq 1 30); do
-            if grep -q "DSH_PROBE_READY" "$RUNNER_TEMP/dsh-probe.log"; then
-              cat "$RUNNER_TEMP/dsh-probe.log"
+            if grep -q "DSH_PROBE_READY" /tmp/dsh-probe.log; then
+              cat /tmp/dsh-probe.log
               exit 0
             fi
             sleep 1
           done
-          cat "$RUNNER_TEMP/dsh-probe.log"
+          cat /tmp/dsh-probe.log
           exit 1
 
       - name: Invoke provider from real DSH headless
@@ -124,7 +124,7 @@ jobs:
           set -e
           echo "$output"
           if [ "$code" -ne 0 ]; then
-            cat "$RUNNER_TEMP/dsh-probe.log" || true
+            cat /tmp/dsh-probe.log || true
             exit "$code"
           fi
           echo "$output" | grep -q "DSH_PLUGIN_E2E_OK"
@@ -153,4 +153,4 @@ jobs:
 
       - name: Show probe log
         if: always()
-        run: cat "$RUNNER_TEMP/dsh-probe.log" || true
+        run: cat /tmp/dsh-probe.log || true
