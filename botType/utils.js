@@ -1,40 +1,54 @@
 // utils.js
 import { log } from '../config/logger.js';
 
-// 安全地记录对象（移除敏感信息）
+const SECRET_KEYS = /authorization|api[_-]?key|token|cookie|password|secret/i;
+const CONTENT_KEYS = /^(content|prompt|query|answer|result|tool_result)$/i;
+
+// 安全地记录对象（移除凭据与模型内容）
 export function sanitizeLog(obj) {
-  if (!obj) return obj;
-  const sanitized = JSON.parse(JSON.stringify(obj));
-  
-  // 隐藏敏感字段
-  if (sanitized.headers && sanitized.headers.authorization) {
-    sanitized.headers.authorization = '******';
+  if (obj === null || obj === undefined) return obj;
+  if (Array.isArray(obj)) return obj.map((value) => sanitizeLog(value));
+  if (typeof obj !== 'object') return obj;
+  const sanitized = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (SECRET_KEYS.test(key)) sanitized[key] = '******';
+    else if (CONTENT_KEYS.test(key)) sanitized[key] = '[redacted]';
+    else if (key === 'messages' || key === 'tool_calls' || key === 'tools') {
+      sanitized[`${key}Count`] = Array.isArray(value) ? value.length : 0;
+    } else sanitized[key] = sanitizeLog(value);
   }
-  if (sanitized.API_KEY) {
-    sanitized.API_KEY = '******';
-  }
-  
   return sanitized;
 }
 
-// 记录请求详情
+function safeModel(model) {
+  if (typeof model !== 'string') return undefined;
+  return model.includes('|') ? model.split('|')[0] : model.slice(0, 160);
+}
+
+// 记录请求元数据；不记录完整 header、prompt、message 或 tool result。
 export function logRequest(req, requestId) {
+  const body = req.body || {};
   log('info', '收到新请求', {
     requestId,
     method: req.method,
     url: req.url,
-    headers: sanitizeLog(req.headers),
-    body: sanitizeLog(req.body),
-    query: req.query
+    contentType: req.headers?.['content-type'],
+    model: safeModel(body.model),
+    stream: body.stream === true,
+    messageCount: Array.isArray(body.messages) ? body.messages.length : 0,
+    toolCount: Array.isArray(body.tools) ? body.tools.length : 0,
+    hasSessionIdentity: Boolean(req.headers?.['x-dsh-conversation-id'] || req.headers?.['x-session-id'] || body.dsh_conversation_id || body.session_id),
   });
 }
 
-// 记录响应详情
+// 记录响应元数据；不记录模型完整输出或工具结果。
 export function logResponse(requestId, status, data) {
   log('info', '发送响应', {
     requestId,
     status,
-    response: sanitizeLog(data)
+    responseType: data?.object || data?.event || typeof data,
+    hasError: Boolean(data?.error),
+    choiceCount: Array.isArray(data?.choices) ? data.choices.length : undefined,
   });
 }
 
@@ -61,12 +75,10 @@ export function generateId() {
 
 // 从 URL 中提取文件扩展名
 export function getFileExtension(url) {
-  // 如果是 base64 数据，从 MIME 类型提取
   if (url.startsWith('data:')) {
     const mimeMatch = url.match(/data:([^;]+)/);
     if (mimeMatch && mimeMatch[1]) {
       const mime = mimeMatch[1];
-      // 常见 MIME 类型映射到扩展名
       const mimeToExt = {
         'image/jpeg': 'jpg',
         'image/png': 'png',
@@ -79,45 +91,33 @@ export function getFileExtension(url) {
         'audio/mpeg': 'mp3',
         'video/mp4': 'mp4'
       };
-      return mimeToExt[mime] || 'bin'; // 默认二进制文件
+      return mimeToExt[mime] || 'bin';
     }
-    return 'bin'; // 默认二进制文件
+    return 'bin';
   }
-  
-  // 如果是 URL，清除参数并提取扩展名
   try {
-    // 移除 URL 参数
     const cleanUrl = url.split('?')[0];
-    // 获取最后一部分并提取扩展名
     const parts = cleanUrl.split('/');
     const filename = parts[parts.length - 1];
     const ext = filename.split('.').pop().toLowerCase();
-    return ext || 'bin'; // 如果没有扩展名，返回默认值
+    return ext || 'bin';
   } catch (error) {
-    log('warn', '无法从 URL 提取文件扩展名', { url: url.substring(0, 30) + '...', error });
+    log('warn', '无法从 URL 提取文件扩展名', { error: error instanceof Error ? error.message : String(error) });
     return 'bin';
   }
 }
 
-// 根据扩展名判断文件类型
 export function getFileType(extension) {
-  // 根据 Dify API 文档中的类型分类
   const documentExts = ['txt', 'md', 'markdown', 'pdf', 'html', 'xlsx', 'xls', 'docx', 'csv', 'eml', 'msg', 'pptx', 'ppt', 'xml', 'epub'];
   const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'];
   const audioExts = ['mp3', 'm4a', 'wav', 'webm', 'amr'];
   const videoExts = ['mp4', 'mov', 'mpeg', 'mpga'];
-  
-  // 将扩展名转为小写进行比较
   const ext = extension.toLowerCase();
-  
   if (documentExts.includes(ext)) return 'document';
   if (imageExts.includes(ext)) return 'image';
   if (audioExts.includes(ext)) return 'audio';
   if (videoExts.includes(ext)) return 'video';
-  
-  // 默认作为自定义类型
   return 'custom';
 }
 
-// 导出日志函数，以便其他模块直接使用
 export { log };
