@@ -9,6 +9,7 @@ const textOf = (m) => typeof m?.content === 'string' ? m.content : Array.isArray
 const dshIdOf = (req) => String(req.headers['x-dsh-conversation-id'] || req.headers['x-session-id'] || req.body?.user || 'default');
 const appIdOf = (req, config) => String(req.headers['x-dify-app-id'] || req.body?.dify_app_id || sha256(config.API_KEY || config.DIFY_API_URL).slice(0,16));
 const resetOf = (req) => req.headers['x-conversation-reset'] === 'true' || req.body?.reset === true;
+const responseLocals = (res) => res.locals ??= {};
 function trace(event) {
   const { dshConversationId, ...rest } = event;
   console.log(JSON.stringify({
@@ -44,10 +45,11 @@ async function handleRequest(req,res,config){
    conversationStore.invalidate(dshConversationId,providerId,difyAppId);
    resolved=resolveConversationState({remoteState:conversationStore.get(dshConversationId,providerId,difyAppId),messages,remoteInvalid:true});
    trace({traceId,dshConversationId,providerId,difyConversationId:remote.conversationId,conversationState:ConversationState.RECOVER,toolSchemaHash:schema.toolSchemaHash,contextStrategy:resolved.contextStrategy});
-   res.locals.gatewayRetryCount=Number(res.locals.gatewayRetryCount||0)+1;
+   const locals=responseLocals(res);
+   locals.gatewayRetryCount=Number(locals.gatewayRetryCount||0)+1;
    result=await callDify(config,makeBody('',resolved.contextStrategy));
  }
- if(!result.ok){res.locals.gatewayErrorType='dify_error';return res.status(result.status||502).json({error:{message:result.json?.message||result.raw||'Dify request failed',type:'dify_error',trace_id:traceId}});}
+ if(!result.ok){responseLocals(res).gatewayErrorType='dify_error';return res.status(result.status||502).json({error:{message:result.json?.message||result.raw||'Dify request failed',type:'dify_error',trace_id:traceId}});}
  const difyConversationId=result.json?.conversation_id||remote?.conversationId||'';if(difyConversationId)remote=conversationStore.set(dshConversationId,providerId,difyAppId,{conversationId:difyConversationId,valid:true,updatedAt:Date.now(),toolSchemaHash:schema.toolSchemaHash});
  let answer=String(result.json?.answer||''),toolCalls=parseToolCalls(answer);const emitted=[],replay=[];
  for(const c of toolCalls){const args=c.function?.arguments||'{}',entry=toolExecutionLedger.begin({providerId,conversationId:dshConversationId,toolCallId:c.id,arguments:args});trace({traceId,dshConversationId,providerId,difyConversationId,conversationState:resolved.state,toolSchemaHash:schema.toolSchemaHash,toolCallId:c.id,argumentsHash:entry.argumentsHash,toolExecutionStatus:entry.status,contextStrategy:resolved.contextStrategy});if(entry.replay)replay.push({call:c,result:entry.result});else if(!entry.duplicate)emitted.push(c);}
