@@ -135,26 +135,29 @@ jobs:
           fi
           echo "$output" | grep -q "DSH_PLUGIN_E2E_OK"
 
-      - name: Verify DSH request reached OpenAI Chat Completions with tools
+      - name: Verify DSH OpenAI requests and inspect lifecycle identifiers
         shell: bash
         run: |
           test -s "$DSH_PROBE_OUTPUT"
           node - <<'NODE'
           const fs = require('fs');
-          const p = JSON.parse(fs.readFileSync(process.env.DSH_PROBE_OUTPUT, 'utf8'));
-          if (p.url !== '/v1/chat/completions') throw new Error(`unexpected path: ${p.url}`);
-          if (!Array.isArray(p.body.messages) || p.body.messages.length === 0) throw new Error('DSH did not send messages');
-          if (!Array.isArray(p.body.tools) || p.body.tools.length === 0) throw new Error('DSH did not send tool schemas');
-          console.log(JSON.stringify({
-            result: 'PASS',
-            url: p.url,
+          const requests = JSON.parse(fs.readFileSync(process.env.DSH_PROBE_OUTPUT, 'utf8'));
+          if (!Array.isArray(requests) || requests.length === 0) throw new Error('no DSH requests captured');
+          const chatRequests = requests.filter((p) => p.url === '/v1/chat/completions');
+          if (chatRequests.length === 0) throw new Error('DSH did not call /v1/chat/completions');
+          if (!chatRequests.some((p) => Array.isArray(p.body.messages) && p.body.messages.length > 0)) throw new Error('DSH did not send messages');
+          const withTools = chatRequests.find((p) => Array.isArray(p.body.tools) && p.body.tools.length > 0);
+          if (!withTools) throw new Error('DSH never sent tool schemas');
+          const summaries = chatRequests.map((p, index) => ({
+            index,
             userAgent: p.headers['user-agent'] || null,
-            messageCount: p.body.messages.length,
-            toolCount: p.body.tools.length,
+            messageCount: Array.isArray(p.body.messages) ? p.body.messages.length : 0,
+            toolCount: Array.isArray(p.body.tools) ? p.body.tools.length : 0,
             bodyKeys: Object.keys(p.body).sort(),
-            possibleConversationFields: Object.fromEntries(Object.entries(p.body).filter(([k]) => /session|conversation|user|metadata/i.test(k))),
-            possibleConversationHeaders: Object.fromEntries(Object.entries(p.headers).filter(([k]) => /session|conversation|dsh|request|trace/i.test(k))),
-          }, null, 2));
+            candidateBodyFields: Object.fromEntries(Object.entries(p.body).filter(([k]) => /session|conversation|user|metadata|trace/i.test(k))),
+            candidateHeaders: Object.fromEntries(Object.entries(p.headers).filter(([k]) => /session|conversation|dsh|request|trace/i.test(k))),
+          }));
+          console.log(JSON.stringify({ result: 'PASS', requestCount: chatRequests.length, summaries }, null, 2));
           NODE
 
       - name: Show probe log
