@@ -1,0 +1,19 @@
+{
+  "name": "@zinianly-aide/dify-core",
+  "version": "0.1.0",
+  "description": "Shared Dify conversation lifecycle and tool idempotency core",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./canonical": "./canonical.js",
+    "./conversation-manager": "./conversation-manager.js",
+    "./tool-schema-registry": "./tool-schema-registry.js",
+    "./tool-execution-ledger": "./tool-execution-ledger.js",
+    "./dify-client": "./dify-client.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
