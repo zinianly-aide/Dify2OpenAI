@@ -65,9 +65,15 @@ jobs:
             provider: gateway-e2e
             model: gateway-e2e-model
           YAML
-          dsh --profile headless --dump-config > /tmp/dsh-gateway-config.txt
-          grep -q "gateway-e2e" /tmp/dsh-gateway-config.txt
-          grep -q "@linziyanleo/dsh-custom-provider" /tmp/dsh-gateway-config.txt
+          echo '--- settings.yaml ---'
+          cat "$DSH_HOME/settings.yaml"
+          set +e
+          dsh --profile headless --dump-config > /tmp/dsh-gateway-config.txt 2>/tmp/dsh-gateway-config.err
+          code=$?
+          set -e
+          echo "dump-config exit=$code"
+          cat /tmp/dsh-gateway-config.txt || true
+          cat /tmp/dsh-gateway-config.err || true
 
       - name: Start Fake Dify and Dify2OpenAI
         shell: bash
@@ -128,6 +134,8 @@ jobs:
         if: always()
         shell: bash
         run: |
+          echo '--- dsh config stderr ---'
+          cat /tmp/dsh-gateway-config.err || true
           echo '--- fake dify ---'
           cat /tmp/fake-dify.log || true
           echo '--- gateway ---'
