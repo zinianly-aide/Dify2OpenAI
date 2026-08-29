@@ -1,8 +1,8 @@
 import z from '@deepseek-ai/schemastery';
 import { assertUsableApiKey, LlmError } from '@deepseek-ai/dsh-llm';
-import { DifyAdapter } from './adapter.js';
+import { DifyAdapter } from './native-adapter.js';
 
-export { DifyAdapter } from './adapter.js';
+export { DifyAdapter } from './native-adapter.js';
 
 export const name = 'llm-dify';
 export const inject = ['llm'];
