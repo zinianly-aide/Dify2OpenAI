@@ -8,6 +8,7 @@ import dshChatHandler from "./botType/dshChatHandler.js";
 import completionHandler from "./botType/completionHandler.js";
 import workflowHandler from "./botType/workflowHandler.js";
 import { logRequest, generateId } from "./botType/utils.js";
+import { gatewayObserver } from './lib/gateway/gateway-observer.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -53,7 +54,7 @@ app.use(express.urlencoded({limit:"100mb",extended:true}));
 
 app.get("/", (req,res)=>res.sendFile(path.join(__dirname,'public/index.html')));
 app.get("/v1/models", (req,res)=>res.json({object:"list",data:[{id:"dify",object:"model",owned_by:"dify",permission:null,capabilities:{vision:true,file_processing:true,tools:true,conversation_lifecycle:true}}]}));
-app.get("/capabilities", (req,res)=>res.json({openai_compatible:true,chat_completions:true,tools:true,tool_call_id_correlation:true,provider_scoped_conversations:true,conversation_lifecycle_activation:"x-dsh-conversation-id",legacy_chat_fallback:true,conversation_states:["BOOTSTRAP","CONTINUE","TOOL_CONTINUE","RECOVER","RESET"],context_strategies:["FULL_BOOTSTRAP","DELTA_CONTINUE","TOOL_CONTINUE","RECOVERY_BOOTSTRAP"],tool_schema_hashing:"sha256",tool_execution_idempotency:true}));
+app.get("/capabilities", (req,res)=>res.json({openai_compatible:true,chat_completions:true,tools:true,tool_call_id_correlation:true,provider_scoped_conversations:true,conversation_lifecycle_activation:"x-dsh-conversation-id",legacy_chat_fallback:true,conversation_states:["BOOTSTRAP","CONTINUE","TOOL_CONTINUE","RECOVER","RESET"],context_strategies:["FULL_BOOTSTRAP","DELTA_CONTINUE","TOOL_CONTINUE","RECOVERY_BOOTSTRAP"],tool_schema_hashing:"sha256",tool_execution_idempotency:true,decision_telemetry:true,decision_policy:"gateway-static-v1",automatic_optimization:false}));
 
 app.post("/v1/chat/completions", async (req,res)=>{
   const requestId=generateId(); const startTime=Date.now(); logRequest(req,requestId);
@@ -61,6 +62,12 @@ app.post("/v1/chat/completions", async (req,res)=>{
   if(!authHeader) return res.status(401).json({error:"Missing Authorization header"});
   try {
     const config=parseConfig(authHeader,req.body.model);
+    gatewayObserver.observe(req,res,{
+      traceId:requestId,
+      providerId:String(req.headers['x-provider-id']||'dify'),
+      difyApiUrl:config.DIFY_API_URL,
+      model:req.body?.model,
+    });
     if(config.BOT_TYPE==="Chat") {
       if(usesDshLifecycle(req)) await dshChatHandler.handleRequest(req,res,config,requestId,startTime);
       else await chatHandler.handleRequest(req,res,config,requestId,startTime);
@@ -68,7 +75,11 @@ app.post("/v1/chat/completions", async (req,res)=>{
     else if(config.BOT_TYPE==="Completion") await completionHandler.handleRequest(req,res,config,requestId,startTime);
     else if(config.BOT_TYPE==="Workflow") await workflowHandler.handleRequest(req,res,config,requestId,startTime);
     else throw new Error("Invalid bot type in configuration.");
-  } catch(error) { log("error","处理请求时发生错误",{requestId,error:{message:error.message,name:error.name}}); if(!res.headersSent) res.status(500).json({error:error.message}); }
+  } catch(error) {
+    res.locals.gatewayErrorType=error?.name||'gateway_error';
+    log("error","处理请求时发生错误",{requestId,error:{message:error.message,name:error.name}});
+    if(!res.headersSent) res.status(500).json({error:error.message});
+  }
 });
 
 const server=http.createServer(app);
