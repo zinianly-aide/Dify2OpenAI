@@ -173,17 +173,18 @@ jobs:
                   supportsReasoningEffort: false
                   maxTokensField: max_tokens
                 models:
-                  - id: 'dify|Chat|http://127.0.0.1:39124'
+                  - id: dify
                     name: Dify2OpenAI Gateway E2E
                     contextWindow: 32768
                     maxTokens: 4096
                     reasoningEfforts: false
           agent-default-model:
             provider: dify2openai-gateway-e2e
-            model: 'dify|Chat|http://127.0.0.1:39124'
+            model: dify
           YAML
           dsh --profile headless --dump-config > /tmp/dsh-gateway-config.txt
           grep -q "dify2openai-gateway-e2e" /tmp/dsh-gateway-config.txt
+          echo 'DIFY2OPENAI_E2E_KEY=http://127.0.0.1:39124|test-key|Chat' >> "$GITHUB_ENV"
 
       - name: Start Fake Dify and Dify2OpenAI gateway
         shell: bash
