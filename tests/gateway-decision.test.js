@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CanonicalRequest } from '../lib/gateway/canonical.js';
+import { CanonicalRequest, detectClientType } from '../lib/gateway/canonical.js';
 import { ContextProfiler } from '../lib/gateway/context-profiler.js';
 import { DecisionEngine } from '../lib/gateway/decision-engine.js';
 import { TelemetryCollector } from '../lib/gateway/telemetry-collector.js';
@@ -41,6 +41,16 @@ test('canonical request is metadata-only and hashes session identity', () => {
   assert.equal(serialized.includes('secret-session-123'), false);
   assert.equal(serialized.includes('super-secret-api-key'), false);
   assert.equal(serialized.includes('sensitive.example'), false);
+});
+
+test('client classification covers DSH OpenCode Cline and Codex without changing request shape', () => {
+  const cases = [
+    [{ headers: { 'user-agent': 'deepseek-harness/0.1' }, body: {} }, 'dsh'],
+    [{ headers: { 'user-agent': 'opencode/1.2.3' }, body: {} }, 'opencode'],
+    [{ headers: { 'user-agent': 'cline/3.2' }, body: {} }, 'cline'],
+    [{ headers: { 'user-agent': 'codex-cli/1.0' }, body: {} }, 'codex'],
+  ];
+  for (const [req, expected] of cases) assert.equal(detectClientType(req), expected);
 });
 
 test('static decision engine always emits reasonCodes and never enables compression', () => {
