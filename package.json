@@ -1,11 +1,13 @@
 {
   "name": "dify2openai",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "turn dify api into openai",
   "main": "app.js",
   "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --test tests/*.test.js",
+    "preflight": "node scripts/preflight.js",
+    "test:integration": "node scripts/integration.js",
     "start": "NODE_ENV=production node app.js",
     "dev": "NODE_ENV=development nodemon app.js",
     "pm2:start": "pm2 start ecosystem.config.cjs",
@@ -32,8 +34,6 @@
     "winston-daily-rotate-file": "^5.0.0",
     "ws": "^8.18.1"
   },
-  "devDependencies": {
-    "nodemon": "^3.1.9"
-  },
+  "devDependencies": { "nodemon": "^3.1.9" },
   "packageManager": "pnpm@9.15.1+sha512.1acb565e6193efbebda772702950469150cf12bcc764262e7587e71d19dc98a423dff9536e57ea44c49bdf790ff694e83c27be5faa23d67e0c033b583be4bfcf"
 }
