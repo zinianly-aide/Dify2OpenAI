@@ -1,0 +1,115 @@
+name: DSH Native Dify Provider E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  dsh-native-provider-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DSH_HOME: /tmp/dsh-native-dify-home
+      DSH_PERMISSION_MODE: danger-full-access
+      DIFY_PROVIDER_ID: dify
+      DIFY_APP_ID: default
+      DIFY_MODEL_NAME: Dify Native E2E
+      DIFY_API_URL: http://127.0.0.1:39125
+      DIFY_API_KEY: test-key
+      DIFY_TIMEOUT: '120000'
+      FAKE_DIFY_NATIVE_PORT: '39125'
+      FAKE_DIFY_NATIVE_OUTPUT: /tmp/fake-dify-native-requests.json
+      CI: 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install pinned DSH and pnpm
+        run: npm install -g pnpm@10 @deepseek-ai/dsh@0.1.0-rc.7
+
+      - name: Initialize headless profile
+        run: dsh --profile headless --dump-config > /tmp/dsh-native-base-config.txt
+
+      - name: Install native Dify provider from checkout
+        shell: bash
+        run: |
+          timeout 180s dsh plugin --profile headless add "$GITHUB_WORKSPACE/packages/dsh-dify-provider" --reporter=append-only
+          dsh plugin --profile headless why dsh-dify-provider --reporter=append-only
+
+      - name: Select native Dify provider
+        shell: bash
+        run: |
+          mkdir -p "$DSH_HOME"
+          cat > "$DSH_HOME/settings.yaml" <<'YAML'
+          agent-default-model:
+            provider: dify
+            model: default
+          YAML
+          dsh --profile headless --dump-config > /tmp/dsh-native-config.txt
+          grep -q "dsh-dify-provider" /tmp/dsh-native-config.txt
+
+      - name: Start Fake Dify
+        shell: bash
+        run: |
+          node scripts/fake-dify-native-provider.mjs > /tmp/fake-dify-native.log 2>&1 &
+          echo $! > /tmp/fake-dify-native.pid
+          for i in $(seq 1 30); do
+            if grep -q "FAKE_DIFY_NATIVE_READY" /tmp/fake-dify-native.log; then exit 0; fi
+            sleep 1
+          done
+          cat /tmp/fake-dify-native.log || true
+          exit 1
+
+      - name: Invoke native provider from real DSH headless
+        shell: bash
+        run: |
+          set +e
+          output=$(timeout 120s dsh --profile headless "Return the provider response. If a tool is requested, execute it and continue." 2>&1)
+          code=$?
+          set -e
+          echo "$output"
+          if [ "$code" -ne 0 ]; then
+            cat /tmp/fake-dify-native.log || true
+            exit "$code"
+          fi
+          echo "$output" | grep -q "DSH_NATIVE_PROVIDER_OK"
+
+      - name: Verify Session to Conversation continuity
+        shell: bash
+        run: |
+          test -s "$FAKE_DIFY_NATIVE_OUTPUT"
+          node - <<'NODE'
+          const fs = require('fs');
+          const requests = JSON.parse(fs.readFileSync(process.env.FAKE_DIFY_NATIVE_OUTPUT, 'utf8'));
+          if (requests.length < 2) throw new Error(`expected at least 2 Dify rounds, got ${requests.length}`);
+          const first = requests[0];
+          const second = requests[1];
+          if ((first.body.conversation_id || '') !== '') throw new Error('BOOTSTRAP must start with empty conversation_id');
+          if (second.body.conversation_id !== 'native-conv-001') throw new Error(`CONTINUE did not reuse native-conv-001: ${second.body.conversation_id}`);
+          if (!/External tools available/.test(first.body.query || '')) throw new Error('first round did not register DSH tool schema');
+          if (!/call_native_001/.test(second.body.query || '')) throw new Error('tool result continuation lost tool_call_id');
+          if (!/DSH_NATIVE_TOOL_OK/.test(second.body.query || '')) throw new Error('tool result content was not forwarded to Dify');
+          if (first.headers.authorization !== 'Bearer test-key') throw new Error('native provider did not use configured Dify credential');
+          console.log(JSON.stringify({
+            result: 'PASS',
+            requestCount: requests.length,
+            firstConversationIdIn: first.body.conversation_id || '',
+            firstConversationIdOut: first.assignedConversationId,
+            secondConversationIdIn: second.body.conversation_id,
+            toolResultCorrelated: true,
+          }, null, 2));
+          NODE
+
+      - name: Show native provider logs
+        if: always()
+        shell: bash
+        run: |
+          echo '--- fake dify native ---'
+          cat /tmp/fake-dify-native.log || true
