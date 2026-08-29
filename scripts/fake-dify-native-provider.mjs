@@ -13,6 +13,11 @@ function sendEvent(res, event) {
   res.write(`data: ${JSON.stringify(event)}\n\n`);
 }
 
+function toolResultPayloadLength(query) {
+  const match = String(query || '').match(/tool_result tool_call_id=[^:]+:\s*([\s\S]*)$/);
+  return match ? match[1].trim().length : 0;
+}
+
 const server = http.createServer(async (req, res) => {
   if (req.method !== 'POST' || req.url !== '/chat-messages') {
     res.statusCode = 404;
@@ -35,6 +40,7 @@ const server = http.createServer(async (req, res) => {
     sessionHashUser: body.user || '',
     hasToolSchema: /External tools available/.test(body.query || ''),
     hasToolResult: /tool_result tool_call_id=/.test(body.query || ''),
+    toolResultPayloadLength: toolResultPayloadLength(body.query),
   };
   requests.push(record);
   persist();
@@ -45,6 +51,7 @@ const server = http.createServer(async (req, res) => {
     sessionHashUser: record.sessionHashUser,
     hasToolSchema: record.hasToolSchema,
     hasToolResult: record.hasToolResult,
+    toolResultPayloadLength: record.toolResultPayloadLength,
     queryLength: String(body.query || '').length,
   }));
 
