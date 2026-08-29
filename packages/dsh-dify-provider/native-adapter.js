@@ -169,11 +169,48 @@ export class DifyAdapter extends LlmAdapter {
     const sessionId = options.sessionId === undefined ? '' : String(options.sessionId);
     if (!sessionId) throw new LlmError('dsh-dify-provider requires GenerateOptions.sessionId', 'MISSING_SESSION_ID');
     if (providerId !== this.providerId) throw new LlmError(`provider "${providerId}" is not owned by dsh-dify-provider`, 'NO_ADAPTER');
+    if (options.stop !== undefined) throw new LlmError('dsh-dify-provider does not support GenerateOptions.stop', 'UNSUPPORTED_OPTION');
     const app = this.apps.get(appId);
     if (!app) throw new LlmError(`Dify app "${appId}" is not configured`, 'UNKNOWN_MODEL');
 
     const messages = options.messages || [];
     assertSupportedMessages(messages);
+
+    // DSH intentionally reuses the same SessionId for auxiliary calls such as
+    // session-title and compaction. They are not conversation turns and must
+    // never read, replace, or advance the main Dify downstream cursor.
+    if (options.purpose !== undefined) {
+      const response = await this.collect(
+        app,
+        this.bodyFor(sessionId, '', fullHistory(messages, options.system)),
+        options.signal,
+      );
+      emitTrace(this.logger, {
+        traceId,
+        dshSessionIdHash: sessionHash(sessionId),
+        providerId,
+        difyAppId: appId,
+        conversationState: 'AUXILIARY',
+        hasDifyConversationId: false,
+        toolCount: options.tools?.length || 0,
+        toolSchemaChanged: false,
+        toolCallCount: 0,
+        toolResultCount: 0,
+        retryCount: 0,
+        latencyMs: Date.now() - startedAt,
+        status: 'ok',
+        purpose: options.purpose,
+      });
+      if (response.answer) {
+        yield { type: 'block-start', index: 0, blockType: 'text' };
+        yield { type: 'text-delta', index: 0, text: response.answer };
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: response.answer } };
+      }
+      if (response.usage) yield { type: 'usage', usage: response.usage };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+      return;
+    }
+
     const tools = options.tools || [];
     const toolResults = tailToolResults(messages);
     const schema = this.toolSchemas.resolve({ dshConversationId: sessionId, providerId, difyAppId: appId, tools });
