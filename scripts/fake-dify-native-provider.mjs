@@ -25,16 +25,35 @@ const server = http.createServer(async (req, res) => {
   try { body = JSON.parse(raw); } catch {}
 
   const index = requests.length;
-  const conversationId = body.conversation_id || 'native-conv-001';
-  requests.push({ method: req.method, url: req.url, headers: req.headers, body, assignedConversationId: conversationId });
+  const conversationId = body.conversation_id || `native-conv-${String(index + 1).padStart(3, '0')}`;
+  const record = {
+    method: req.method,
+    url: req.url,
+    headers: req.headers,
+    body,
+    assignedConversationId: conversationId,
+    sessionHashUser: body.user || '',
+    hasToolSchema: /External tools available/.test(body.query || ''),
+    hasToolResult: /tool_result tool_call_id=/.test(body.query || ''),
+  };
+  requests.push(record);
   persist();
+  console.log('FAKE_DIFY_NATIVE_REQUEST', JSON.stringify({
+    index,
+    conversationIdIn: body.conversation_id || '',
+    conversationIdOut: conversationId,
+    sessionHashUser: record.sessionHashUser,
+    hasToolSchema: record.hasToolSchema,
+    hasToolResult: record.hasToolResult,
+    queryLength: String(body.query || '').length,
+  }));
 
   res.statusCode = 200;
   res.setHeader('content-type', 'text/event-stream; charset=utf-8');
   res.setHeader('cache-control', 'no-cache');
   const createdAt = Math.floor(Date.now() / 1000);
 
-  if (index === 0) {
+  if (!record.hasToolResult && record.hasToolSchema) {
     sendEvent(res, {
       event: 'message',
       answer: JSON.stringify({
