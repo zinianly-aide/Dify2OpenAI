@@ -94,22 +94,34 @@ jobs:
           node - <<'NODE'
           const fs = require('fs');
           const requests = JSON.parse(fs.readFileSync(process.env.FAKE_DIFY_NATIVE_OUTPUT, 'utf8'));
-          if (requests.length < 2) throw new Error(`expected at least 2 Dify rounds, got ${requests.length}`);
-          const first = requests[0];
-          const second = requests[1];
-          if ((first.body.conversation_id || '') !== '') throw new Error('BOOTSTRAP must start with empty conversation_id');
-          if (second.body.conversation_id !== 'native-conv-001') throw new Error(`CONTINUE did not reuse native-conv-001: ${second.body.conversation_id}`);
-          if (!/External tools available/.test(first.body.query || '')) throw new Error('first round did not register DSH tool schema');
-          if (!/call_native_001/.test(second.body.query || '')) throw new Error('tool result continuation lost tool_call_id');
-          if (!/DSH_NATIVE_TOOL_OK/.test(second.body.query || '')) throw new Error('tool result content was not forwarded to Dify');
-          if (first.headers.authorization !== 'Bearer test-key') throw new Error('native provider did not use configured Dify credential');
+          const bootstrap = requests.find((r) => r.hasToolSchema && !r.hasToolResult);
+          const continuation = requests.find((r) => r.hasToolResult);
+          if (!bootstrap) throw new Error('missing main BOOTSTRAP request');
+          if (!continuation) throw new Error('missing TOOL_CONTINUE request');
+          if ((bootstrap.body.conversation_id || '') !== '') throw new Error('BOOTSTRAP must start with empty conversation_id');
+          if (continuation.body.conversation_id !== bootstrap.assignedConversationId) {
+            throw new Error(`TOOL_CONTINUE did not reuse ${bootstrap.assignedConversationId}: ${continuation.body.conversation_id}`);
+          }
+          if (continuation.sessionHashUser !== bootstrap.sessionHashUser) throw new Error('DSH Session hash changed across main rounds');
+          if (!/call_native_001/.test(continuation.body.query || '')) throw new Error('tool result continuation lost tool_call_id');
+          if (!/DSH_NATIVE_TOOL_OK/.test(continuation.body.query || '')) throw new Error('tool result content was not forwarded to Dify');
+          if (continuation.hasToolSchema) throw new Error('unchanged tool schema was resent after auxiliary call');
+          const auxiliaries = requests.filter((r) => r !== bootstrap && r !== continuation);
+          if (auxiliaries.some((r) => (r.body.conversation_id || '') !== '')) {
+            throw new Error('auxiliary DSH calls must not reuse the main Dify conversation');
+          }
+          if (bootstrap.headers.authorization !== 'Bearer test-key') throw new Error('native provider did not use configured Dify credential');
           console.log(JSON.stringify({
             result: 'PASS',
             requestCount: requests.length,
-            firstConversationIdIn: first.body.conversation_id || '',
-            firstConversationIdOut: first.assignedConversationId,
-            secondConversationIdIn: second.body.conversation_id,
+            sessionHashUser: bootstrap.sessionHashUser,
+            bootstrapConversationIdIn: bootstrap.body.conversation_id || '',
+            bootstrapConversationIdOut: bootstrap.assignedConversationId,
+            continuationConversationIdIn: continuation.body.conversation_id,
+            auxiliaryRequestCount: auxiliaries.length,
+            auxiliaryIsolated: true,
             toolResultCorrelated: true,
+            toolSchemaReused: true,
           }, null, 2));
           NODE
 
