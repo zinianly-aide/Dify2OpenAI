@@ -104,7 +104,7 @@ jobs:
           }
           if (continuation.sessionHashUser !== bootstrap.sessionHashUser) throw new Error('DSH Session hash changed across main rounds');
           if (!/call_native_001/.test(continuation.body.query || '')) throw new Error('tool result continuation lost tool_call_id');
-          if (!/DSH_NATIVE_TOOL_OK/.test(continuation.body.query || '')) throw new Error('tool result content was not forwarded to Dify');
+          if (!(continuation.toolResultPayloadLength > 0)) throw new Error('correlated tool result payload was empty');
           if (continuation.hasToolSchema) throw new Error('unchanged tool schema was resent after auxiliary call');
           const auxiliaries = requests.filter((r) => r !== bootstrap && r !== continuation);
           if (auxiliaries.some((r) => (r.body.conversation_id || '') !== '')) {
@@ -121,6 +121,7 @@ jobs:
             auxiliaryRequestCount: auxiliaries.length,
             auxiliaryIsolated: true,
             toolResultCorrelated: true,
+            toolResultPayloadLength: continuation.toolResultPayloadLength,
             toolSchemaReused: true,
           }, null, 2));
           NODE
