@@ -42,13 +42,6 @@ function usageOf(metadata) {
   };
 }
 
-function ownsAssistant(message, providerId, appId) {
-  return message?.role === 'assistant'
-    && message?.source?.kind === 'model'
-    && message.source.provider === providerId
-    && message.source.model === appId;
-}
-
 function ledgerInput(sessionId, providerId, appId, call) {
   return {
     providerId,
@@ -188,11 +181,6 @@ export class DifyAdapter extends LlmAdapter {
     let remote = this.conversations.get(sessionId, providerId, appId);
     let resolved = resolveConversationState({ remoteState: remote, messages, toolResults });
 
-    if (remote?.conversationId && messages.length && !messages.some((m) => ownsAssistant(m, providerId, appId))) {
-      this.conversations.invalidate(sessionId, providerId, appId);
-      resolved = resolveConversationState({ remoteState: remote, messages, toolResults, remoteInvalid: true });
-    }
-
     let retryCount = 0;
     const request = async (conversationId, strategy) => this.collect(
       app,
@@ -266,6 +254,14 @@ export class DifyAdapter extends LlmAdapter {
       answer = replayResponse.answer;
       usage = replayResponse.usage || usage;
       conversationId = replayResponse.conversationId || conversationId;
+      if (conversationId) {
+        this.conversations.set(sessionId, providerId, appId, {
+          conversationId,
+          valid: true,
+          updatedAt: Date.now(),
+          toolSchemaHash: schema.toolSchemaHash,
+        });
+      }
       calls = parseToolCalls(answer);
     }
 
