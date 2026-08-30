@@ -10,6 +10,7 @@ import completionHandler from "./botType/completionHandler.js";
 import workflowHandler from "./botType/workflowHandler.js";
 import { logRequest, generateId } from "./botType/utils.js";
 import { gatewayObserver } from './lib/gateway/gateway-observer.js';
+import { selectPolicyForRequest } from './lib/policy-request.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -54,14 +55,15 @@ app.use(express.json({limit:"100mb"}));
 app.use(express.urlencoded({limit:"100mb",extended:true}));
 
 app.get("/", (req,res)=>res.sendFile(path.join(__dirname,'public/index.html')));
-app.get("/v1/models", (req,res)=>res.json({object:"list",data:[{id:"dify",object:"model",owned_by:"dify",permission:null,capabilities:{vision:true,file_processing:true,tools:true,conversation_lifecycle:true,context_compression:true,context_checkpoint:true,conversation_generations:true,backend_registry:true,deterministic_backend_routing:true,context_migration:true}}]}));
-app.get("/capabilities", (req,res)=>res.json({openai_compatible:true,chat_completions:true,tools:true,tool_call_id_correlation:true,provider_scoped_conversations:true,conversation_lifecycle_activation:"x-dsh-conversation-id",legacy_chat_fallback:true,conversation_states:["BOOTSTRAP","CONTINUE","TOOL_CONTINUE","RECOVER","RESET","CHECKPOINT","ROTATE","ROTATE_BOOTSTRAP"],context_strategies:["FULL_BOOTSTRAP","DELTA_CONTINUE","TOOL_CONTINUE","RECOVERY_BOOTSTRAP","CHECKPOINT_BOOTSTRAP"],backend_generation_states:["BOOTSTRAPPING","ACTIVE","CHECKPOINTED","INVALID","ARCHIVED"],tool_schema_hashing:"sha256",tool_execution_idempotency:true,decision_telemetry:true,decision_policy:"gateway-context-compression-v1",context_compression:true,context_compression_modes:["none","tool_prune","light","heavy"],context_compression_configurable:true,context_checkpoint:true,backend_conversation_generations:true,two_phase_rotation:true,backend_registry:true,backend_provider_types:["dify","openai-compatible","local-openai-compatible"],backend_health_states:["HEALTHY","DEGRADED","UNAVAILABLE"],deterministic_backend_routing:true,routing_policy:"deterministic-backend-router-v1",context_migration:true,stateful_and_stateless_backends:true,deterministic_fallback:true,adaptive_routing_configured:adaptiveRoutingConfigured(),ml_routing:false,policy_learning:false,llm_policy_mutation:false,canary:false,automatic_threshold_tuning:false,automatic_optimization:false}));
+app.get("/v1/models", (req,res)=>res.json({object:"list",data:[{id:"dify",object:"model",owned_by:"dify",permission:null,capabilities:{vision:true,file_processing:true,tools:true,conversation_lifecycle:true,context_compression:true,context_checkpoint:true,conversation_generations:true,backend_registry:true,deterministic_backend_routing:true,context_migration:true,policy_registry:true,stable_canary_assignment:true,guardrail_monitoring:true,auto_rollback:true}}]}));
+app.get("/capabilities", (req,res)=>res.json({openai_compatible:true,chat_completions:true,tools:true,tool_call_id_correlation:true,provider_scoped_conversations:true,conversation_lifecycle_activation:"x-dsh-conversation-id",legacy_chat_fallback:true,conversation_states:["BOOTSTRAP","CONTINUE","TOOL_CONTINUE","RECOVER","RESET","CHECKPOINT","ROTATE","ROTATE_BOOTSTRAP"],context_strategies:["FULL_BOOTSTRAP","DELTA_CONTINUE","TOOL_CONTINUE","RECOVERY_BOOTSTRAP","CHECKPOINT_BOOTSTRAP"],backend_generation_states:["BOOTSTRAPPING","ACTIVE","CHECKPOINTED","INVALID","ARCHIVED"],tool_schema_hashing:"sha256",tool_execution_idempotency:true,decision_telemetry:true,decision_policy:"gateway-context-compression-v1",context_compression:true,context_compression_modes:["none","tool_prune","light","heavy"],context_compression_configurable:true,context_checkpoint:true,backend_conversation_generations:true,two_phase_rotation:true,backend_registry:true,backend_provider_types:["dify","openai-compatible","local-openai-compatible"],backend_health_states:["HEALTHY","DEGRADED","UNAVAILABLE"],deterministic_backend_routing:true,routing_policy:"deterministic-backend-router-v1",context_migration:true,stateful_and_stateless_backends:true,deterministic_fallback:true,adaptive_routing_configured:adaptiveRoutingConfigured(),policy_registry:true,policy_states:["DRAFT","REPLAY_PASSED","CANARY_5","CANARY_20","CANARY_50","ACTIVE","REJECTED","ROLLED_BACK"],stable_canary_assignment:true,canary_percentages:[5,20,50],guardrail_monitoring:true,auto_rollback:true,policy_runtime_configured:Boolean(process.env.GATEWAY_POLICIES_JSON),ml_routing:false,policy_learning:false,llm_policy_mutation:false,canary:true,automatic_threshold_tuning:false,automatic_optimization:false}));
 
 app.post("/v1/chat/completions", async (req,res)=>{
   const requestId=generateId(); const startTime=Date.now(); logRequest(req,requestId);
   const authHeader=req.headers.authorization;
   if(!authHeader) return res.status(401).json({error:"Missing Authorization header"});
   try {
+    selectPolicyForRequest(req, res);
     if (adaptiveRoutingConfigured()) {
       gatewayObserver.observe(req,res,{
         traceId:requestId,
