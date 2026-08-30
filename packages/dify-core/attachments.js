@@ -49,6 +49,17 @@ export function imageAttachmentFromOpenAIBlock(block) {
 export function imageAttachmentFromDshBlock(block) {
   if (!block || block.type !== 'image') return null;
 
+  const durable = block.attachment;
+  if (durable?.attachmentId && durable?.mediaType) {
+    return {
+      type: 'image',
+      source: {
+        kind: 'dsh_attachment',
+        attachment: durable,
+      },
+    };
+  }
+
   const direct = normalizeImageReference(block.image_url || block.url);
   if (direct) return direct;
 
@@ -70,21 +81,24 @@ export function imageAttachmentFromDshBlock(block) {
     };
   }
 
-  throw attachmentError('DSH image block must contain an http(s) URL or base64 image source');
+  throw attachmentError('DSH image block must contain a durable attachment reference, http(s) URL, or base64 image source');
 }
 
-function isActualUserMessage(message, dialect) {
-  if (message?.role !== 'user') return false;
-  if (dialect === 'dsh') return !message?.source || message.source.kind === 'user';
-  return true;
+function collectBlocks(blocks, mapper, out) {
+  for (const block of Array.isArray(blocks) ? blocks : []) {
+    const attachment = mapper(block);
+    if (attachment) out.push(attachment);
+    if (block?.type === 'tool-result' && Array.isArray(block.content)) collectBlocks(block.content, mapper, out);
+  }
 }
 
 export function currentImageAttachments(messages = [], dialect = 'openai') {
   const last = messages.at(-1);
-  if (!isActualUserMessage(last, dialect)) return [];
-  const content = Array.isArray(last.content) ? last.content : [];
+  if (!last) return [];
   const mapper = dialect === 'dsh' ? imageAttachmentFromDshBlock : imageAttachmentFromOpenAIBlock;
-  return content.map(mapper).filter(Boolean);
+  const out = [];
+  collectBlocks(last.content, mapper, out);
+  return out;
 }
 
 function extensionForMime(mimeType) {
@@ -96,17 +110,11 @@ function uploadEndpoint(baseURL) {
   return `${String(baseURL || '').replace(/\/+$/, '')}/files/upload`;
 }
 
-export async function uploadDifyImage({ baseURL, apiKey, attachment, user, signal, headers = {} }) {
-  if (attachment?.type !== 'image' || attachment?.source?.kind !== 'data') {
-    throw attachmentError('uploadDifyImage requires an inline image attachment');
-  }
+async function uploadDifyImageBytes({ baseURL, apiKey, bytes, mimeType, contentHash, user, signal, headers = {} }) {
   if (!user) throw attachmentError('Dify image upload requires the same non-empty user used by chat-messages', 'INVALID_ATTACHMENT_USER');
-
-  const bytes = Buffer.from(attachment.source.base64, 'base64');
-  if (!bytes.length) throw attachmentError('Inline image decoded to an empty file');
-  const mimeType = attachment.source.mimeType;
+  if (!bytes?.length) throw attachmentError('Inline image decoded to an empty file');
   const form = new FormData();
-  form.append('file', new Blob([bytes], { type: mimeType }), `image-${attachment.source.contentHash.slice(0, 12)}.${extensionForMime(mimeType)}`);
+  form.append('file', new Blob([bytes], { type: mimeType }), `image-${contentHash.slice(0, 12)}.${extensionForMime(mimeType)}`);
   form.append('user', String(user));
 
   const response = await fetch(uploadEndpoint(baseURL), {
@@ -129,7 +137,32 @@ export async function uploadDifyImage({ baseURL, apiKey, attachment, user, signa
   return String(json.id);
 }
 
-export async function resolveDifyFiles({ baseURL, apiKey, attachments = [], user, signal, headers = {} }) {
+export async function uploadDifyImage({ baseURL, apiKey, attachment, user, signal, headers = {} }) {
+  if (attachment?.type !== 'image' || attachment?.source?.kind !== 'data') {
+    throw attachmentError('uploadDifyImage requires an inline image attachment');
+  }
+  const bytes = Buffer.from(attachment.source.base64, 'base64');
+  return uploadDifyImageBytes({
+    baseURL,
+    apiKey,
+    bytes,
+    mimeType: attachment.source.mimeType,
+    contentHash: attachment.source.contentHash,
+    user,
+    signal,
+    headers,
+  });
+}
+
+export async function resolveDifyFiles({
+  baseURL,
+  apiKey,
+  attachments = [],
+  user,
+  signal,
+  headers = {},
+  readDshAttachment,
+}) {
   const files = [];
   for (const attachment of attachments) {
     if (attachment?.type !== 'image') continue;
@@ -139,6 +172,29 @@ export async function resolveDifyFiles({ baseURL, apiKey, attachments = [], user
     }
     if (attachment.source?.kind === 'data') {
       const uploadFileId = await uploadDifyImage({ baseURL, apiKey, attachment, user, signal, headers });
+      files.push({ type: 'image', transfer_method: 'local_file', upload_file_id: uploadFileId });
+      continue;
+    }
+    if (attachment.source?.kind === 'dsh_attachment') {
+      if (typeof readDshAttachment !== 'function') {
+        throw attachmentError('DSH durable image attachment cannot be read because no attachment store is available', 'ATTACHMENT_STORE_UNAVAILABLE');
+      }
+      const stored = await readDshAttachment(attachment.source.attachment, signal);
+      const data = stored?.data;
+      const ref = stored?.ref || attachment.source.attachment;
+      const bytes = data instanceof Uint8Array ? data : Buffer.from(data || []);
+      const mimeType = String(ref?.mediaType || attachment.source.attachment.mediaType || 'application/octet-stream');
+      if (!mimeType.startsWith('image/')) throw attachmentError('DSH attachment store returned a non-image object', 'INVALID_ATTACHMENT_MEDIA_TYPE');
+      const uploadFileId = await uploadDifyImageBytes({
+        baseURL,
+        apiKey,
+        bytes,
+        mimeType,
+        contentHash: sha256(Buffer.from(bytes).toString('base64')),
+        user,
+        signal,
+        headers,
+      });
       files.push({ type: 'image', transfer_method: 'local_file', upload_file_id: uploadFileId });
       continue;
     }
