@@ -144,8 +144,16 @@ test('client backend model profile rule can override thresholds deterministicall
       thresholds: { toolPruneThreshold: 0.70, lightThreshold: 0.80, heavyThreshold: 0.90, forceThreshold: 0.97 },
     }],
   });
+  const removableToolHistory = [
+    { role: 'system', content: 'core' },
+    { role: 'user', content: 'old tool request' },
+    { role: 'assistant', tool_calls: [{ id: 'old-profile-call', type: 'function', function: { name: 'read', arguments: '{}' } }] },
+    { role: 'tool', tool_call_id: 'old-profile-call', content: oldText },
+    { role: 'assistant', content: 'done' },
+    { role: 'user', content: 'current request' },
+  ];
   const matched = c.compress({
-    messages: baseMessages(),
+    messages: removableToolHistory,
     profile: profile(0.75, { clientType: 'codex', backendId: 'backend-large', model: 'large' }),
   });
   const unmatched = c.compress({
