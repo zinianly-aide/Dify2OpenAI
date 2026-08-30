@@ -71,20 +71,26 @@ export class CompressionQualityGuard {
   run({ messages = [], tools = [], system, initialProfile, compressor, profiler }) {
     const target = this.config.targetUtilization;
     const initialUtilization = initialProfile?.contextUtilization;
+    const initialDecision = compressor.policy.decide(initialProfile);
     const passSummaries = [];
-    if (initialUtilization !== undefined && initialUtilization <= target) {
-      const first = compressor.compress({ messages, tools, system, profile: initialProfile, targetUtilization: target });
+
+    if (initialDecision.mode === 'none') {
+      const noChange = compressor.compress({ messages, tools, system, profile: initialProfile, targetUtilization: target });
+      const targetReached = initialUtilization !== undefined && initialUtilization <= target;
       return {
-        messages: first.messages,
+        messages: noChange.messages,
         profile: initialProfile,
         passes: passSummaries,
         result: new CompressionResult({
-          ...first.result,
+          ...noChange.result,
           targetUtilization: target,
           compressionPasses: 0,
-          targetReached: true,
-          unableToReachTarget: false,
-          reasonCodes: [...first.result.reasonCodes, 'TARGET_REACHED'],
+          targetReached,
+          unableToReachTarget: !targetReached,
+          reasonCodes: [
+            ...noChange.result.reasonCodes,
+            targetReached ? 'TARGET_REACHED' : 'NOT_ENOUGH_COMPRESSIBLE_HISTORY',
+          ],
         }),
       };
     }
@@ -99,7 +105,7 @@ export class CompressionQualityGuard {
 
     while (passes < this.config.maxCompressionPasses) {
       const policyDecision = compressor.policy.decide(currentProfile);
-      mode = mode === undefined ? policyDecision.mode : nextMode(mode);
+      mode = mode === undefined ? initialDecision.mode : nextMode(mode);
       if (mode === 'none') {
         const noChange = compressor.compress({ messages: currentMessages, tools, system, profile: currentProfile, targetUtilization: target });
         const base = aggregateBefore === undefined ? noChange.result : new CompressionResult({
