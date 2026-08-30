@@ -48,12 +48,11 @@ const difyUsageExtractor = new DifyUsageExtractor();
 
 function usageOf(metadata) {
   const extracted = difyUsageExtractor.extract({ metadata });
-  const raw = metadata?.usage;
-  if (!extracted && !raw) return undefined;
-  const totalTokens = n(raw?.total_tokens);
+  if (extracted?.backendPromptTokens === undefined || extracted?.backendCompletionTokens === undefined) return undefined;
+  const totalTokens = n(metadata?.usage?.total_tokens);
   return {
-    inputTokens: extracted?.backendPromptTokens ?? 0,
-    outputTokens: extracted?.backendCompletionTokens ?? 0,
+    inputTokens: extracted.backendPromptTokens,
+    outputTokens: extracted.backendCompletionTokens,
     ...(totalTokens === undefined ? {} : { totalTokens }),
   };
 }
