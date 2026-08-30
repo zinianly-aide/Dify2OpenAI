@@ -3,9 +3,10 @@ import { StableCanaryAssignment } from './canary-assignment.js';
 import { PolicyStatus } from './policy-registry.js';
 
 export class PromotionController {
-  constructor({ registry, monitor } = {}) {
+  constructor({ registry, monitor, blockCanaryPolicy } = {}) {
     this.registry = registry;
     this.monitor = monitor;
+    this.blockCanaryPolicy = blockCanaryPolicy || (() => {});
     this.lastStableActivePolicy = registry?.getActive?.() || null;
   }
 
@@ -78,6 +79,7 @@ export class PromotionController {
         policy: promoted,
       });
     } catch (error) {
+      try { this.blockCanaryPolicy(policyVersion, ['GUARDRAIL_EVALUATION_FAILED']); } catch {}
       return Object.freeze({
         status: GuardrailStatus.EVALUATION_FAILED,
         reasonCodes: Object.freeze(['GUARDRAIL_EVALUATION_FAILED', String(error?.code || error?.message || 'UNKNOWN_ERROR').slice(0, 128)]),
@@ -122,15 +124,33 @@ export class PolicyControlPlane {
     this.registry = registry;
     this.monitor = monitor;
     this.assignment = new StableCanaryAssignment({ registry });
-    this.promotion = new PromotionController({ registry, monitor });
+    this.blockedCanaryPolicies = new Map();
+    this.promotion = new PromotionController({ registry, monitor, blockCanaryPolicy: (version, reasons) => this.blockCanaryPolicy(version, reasons) });
     this.stableActivePolicy = registry?.getActive?.() || null;
   }
+
+  blockCanaryPolicy(policyVersion, reasonCodes = ['CANARY_TRAFFIC_BLOCKED']) {
+    this.blockedCanaryPolicies.set(String(policyVersion), Object.freeze([...reasonCodes]));
+  }
+
+  unblockCanaryPolicy(policyVersion) { this.blockedCanaryPolicies.delete(String(policyVersion)); }
 
   selectPolicy({ sessionId } = {}) {
     try {
       const selected = this.assignment.select({ sessionId });
       const active = this.registry.getActive();
       if (active) this.stableActivePolicy = active;
+      if (selected.policyAssignment === 'CANARY' && this.blockedCanaryPolicies.has(selected.selectedPolicyVersion)) {
+        return Object.freeze({
+          selectedPolicyVersion: active.policyVersion,
+          policyAssignment: 'STABLE_ACTIVE_FAIL_OPEN',
+          canaryStage: selected.canaryStage,
+          canaryBucket: selected.canaryBucket,
+          canaryPercent: selected.canaryPercent,
+          config: active.config,
+          selectionFallbackReason: this.blockedCanaryPolicies.get(selected.selectedPolicyVersion).join(','),
+        });
+      }
       const validation = this.registry.validatePolicy(selected.selectedPolicyVersion);
       if (!validation.valid) throw new Error('SELECTED_POLICY_VALIDATION_FAILED');
       return selected;
