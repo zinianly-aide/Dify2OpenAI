@@ -59,11 +59,20 @@ export function apply(ctx, config) {
     );
   };
 
+  const readDshAttachment = async (ref, signal) => {
+    const attachments = ctx.get('attachments');
+    if (attachments === undefined || typeof attachments.readImage !== 'function') {
+      throw new LlmError('DSH attachment store is unavailable for image input', 'ATTACHMENT_STORE_UNAVAILABLE');
+    }
+    return attachments.readImage(ref, signal);
+  };
+
   const adapter = new DifyAdapter({
     providerId,
     apps,
     timeoutMs: config.timeoutMs || 120000,
     resolveApiKey,
+    readDshAttachment,
     logger: ctx.logger,
   });
   ctx.llm.registerAdapter([providerId], adapter);
