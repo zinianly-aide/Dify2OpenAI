@@ -25,6 +25,10 @@ function isCoreInstruction(message) {
   return message?.role === 'system' || message?.role === 'developer';
 }
 
+function isCompressionSummary(message) {
+  return message?.gatewayCompressionSummary === true;
+}
+
 function isHumanUserMessage(message) {
   if (message?.role !== 'user') return false;
   return message?.source?.kind !== 'tool';
@@ -132,7 +136,11 @@ function summaryMessage(messages, maxChars) {
   const unique = [...new Set(fragments)].join('\n').slice(0, maxChars);
   if (!unique) return { message: null, categories: [] };
   return {
-    message: { role: 'assistant', content: `Compressed prior context (important references only):\n${unique}` },
+    message: {
+      role: 'assistant',
+      gatewayCompressionSummary: true,
+      content: `Compressed prior context (important references only):\n${unique}`,
+    },
     categories: [...categories],
   };
 }
@@ -186,7 +194,8 @@ export class ContextCompressor {
     const toolChains = toolChainIndexes(input);
     const preserve = new Set();
     for (let i = 0; i < input.length; i += 1) {
-      if (isCoreInstruction(input[i]) || recent.has(i) || toolChains.has(i)) preserve.add(i);
+      const protectedRecent = recent.has(i) && !isCompressionSummary(input[i]);
+      if (isCoreInstruction(input[i]) || protectedRecent || toolChains.has(i)) preserve.add(i);
     }
     const latestHumanUser = [...input.keys()].reverse().find((i) => isHumanUserMessage(input[i]));
     if (latestHumanUser !== undefined) preserve.add(latestHumanUser);
@@ -203,6 +212,7 @@ export class ContextCompressor {
     const categories = new Set();
     if (removed.some(isToolMessage)) categories.add('completed_tool_history');
     if (removed.some((m) => !isToolMessage(m))) categories.add('older_conversation');
+    if (removed.some(isCompressionSummary)) categories.add('prior_compression_summary');
 
     if ((decision.mode === 'light' || decision.mode === 'heavy') && removed.length) {
       let maxChars = decision.mode === 'heavy' ? config.heavySummaryMaxChars : config.lightSummaryMaxChars;
