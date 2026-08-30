@@ -23,6 +23,9 @@ jobs:
       DIFY_TELEMETRY_STDOUT: '1'
       FAKE_DIFY_NATIVE_PORT: '39125'
       FAKE_DIFY_NATIVE_OUTPUT: /tmp/fake-dify-native-requests.json
+      FAKE_DIFY_NATIVE_UPLOAD_OUTPUT: /tmp/fake-dify-native-uploads.json
+      FAKE_DIFY_NATIVE_IMAGE_E2E: '1'
+      FAKE_DIFY_NATIVE_IMAGE_PATH: /tmp/dsh-native-read-image.png
       CI: 'true'
     steps:
       - name: Checkout
@@ -62,6 +65,13 @@ jobs:
           YAML
           dsh --profile headless --dump-config > /tmp/dsh-native-config.txt
           grep -q "dsh-dify-provider" /tmp/dsh-native-config.txt
+
+      - name: Create real image fixture
+        shell: bash
+        run: |
+          printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZQtMAAAAASUVORK5CYII=' | base64 --decode > "$FAKE_DIFY_NATIVE_IMAGE_PATH"
+          test -s "$FAKE_DIFY_NATIVE_IMAGE_PATH"
+          file "$FAKE_DIFY_NATIVE_IMAGE_PATH"
 
       - name: Start Fake Dify
         shell: bash
@@ -128,6 +138,43 @@ jobs:
           }, null, 2));
           NODE
 
+      - name: Verify real DSH read_image upload
+        shell: bash
+        run: |
+          test -s "$FAKE_DIFY_NATIVE_UPLOAD_OUTPUT"
+          node - <<'NODE'
+          const fs = require('fs');
+          const requests = JSON.parse(fs.readFileSync(process.env.FAKE_DIFY_NATIVE_OUTPUT, 'utf8'));
+          const uploads = JSON.parse(fs.readFileSync(process.env.FAKE_DIFY_NATIVE_UPLOAD_OUTPUT, 'utf8'));
+          const bootstrap = requests.find((r) => r.hasToolSchema && !r.hasToolResult);
+          const continuation = requests.find((r) => r.hasToolResult);
+          if (!bootstrap || !continuation) throw new Error('missing native read_image lifecycle requests');
+          if (uploads.length !== 1) throw new Error(`read_image should upload exactly once, got ${uploads.length}`);
+          const upload = uploads[0];
+          if (!upload.authorizationPresent) throw new Error('image upload did not use Dify credential');
+          if (!/^multipart\/form-data;/i.test(upload.contentType || '')) throw new Error('image upload was not multipart/form-data');
+          if (!upload.hasMultipartFile || !upload.hasMultipartUser) throw new Error('image upload multipart payload is incomplete');
+          if (!(upload.contentLength > 0)) throw new Error('image upload body was empty');
+          if (bootstrap.fileCount !== 0) throw new Error('BOOTSTRAP unexpectedly attached an image before read_image');
+          if (continuation.fileCount !== 1) throw new Error(`TOOL_CONTINUE should carry one image, got ${continuation.fileCount}`);
+          if (!Array.isArray(continuation.fileIds) || continuation.fileIds[0] !== upload.id) {
+            throw new Error(`TOOL_CONTINUE did not reference uploaded image ${upload.id}`);
+          }
+          const file = continuation.body.files?.[0];
+          if (file?.type !== 'image' || file?.transfer_method !== 'local_file' || file?.upload_file_id !== upload.id) {
+            throw new Error('TOOL_CONTINUE did not use Dify local_file image protocol');
+          }
+          console.log(JSON.stringify({
+            result: 'PASS',
+            realDshReadImage: true,
+            uploadCount: uploads.length,
+            uploadId: upload.id,
+            continuationConversationId: continuation.body.conversation_id,
+            continuationFileCount: continuation.fileCount,
+            duplicateImageUpload: false,
+          }, null, 2));
+          NODE
+
       - name: Verify native decision telemetry
         shell: bash
         run: |
@@ -170,5 +217,7 @@ jobs:
         run: |
           echo '--- fake dify native ---'
           cat /tmp/fake-dify-native.log || true
+          echo '--- fake dify native uploads ---'
+          cat "$FAKE_DIFY_NATIVE_UPLOAD_OUTPUT" || true
           echo '--- dsh native output ---'
           cat /tmp/dsh-native-output.log || true
