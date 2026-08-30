@@ -66,6 +66,27 @@ test('single pass reaches target', () => {
   assert.ok(result.result.reasonCodes.includes('TARGET_REACHED'));
 });
 
+test('initial policy compression runs before target guard even when utilization is already below target', () => {
+  const messages = [
+    { role: 'system', content: 'SYSTEM-MUST-STAY' },
+    { role: 'user', content: 'old request' },
+    { role: 'assistant', tool_calls: [{ id: 'old-call', type: 'function', function: { name: 'read_file', arguments: '{"path":"src/old.js"}' } }] },
+    { role: 'tool', tool_call_id: 'old-call', content: 'old completed result' },
+    { role: 'assistant', content: 'old completion' },
+    { role: 'user', content: 'CURRENT-REQUEST-MUST-STAY' },
+  ];
+  const h = harness({ quality: { targetUtilization: 0.68, maxCompressionPasses: 2, minimumSavingsRatio: 0 } });
+  const result = h.guard.run({ messages, initialProfile: profileFor(messages, 0.60), compressor: h.compressor, profiler: h.profiler });
+  assert.equal(result.passes.length, 1);
+  assert.equal(result.passes[0].mode, 'tool_prune');
+  assert.equal(result.result.compressionPasses, 1);
+  assert.equal(result.result.targetReached, true);
+  assert.ok(result.result.savedTokens > 0);
+  assert.equal(result.messages.some((m) => m.tool_call_id === 'old-call'), false);
+  assert.ok(result.messages.some((m) => m.role === 'system' && m.content === 'SYSTEM-MUST-STAY'));
+  assert.ok(result.messages.some((m) => m.role === 'user' && m.content === 'CURRENT-REQUEST-MUST-STAY'));
+});
+
 test('multiple heavy passes reach target and dispatch representation is final pass', () => {
   const messages = twoPassHeavyMessages();
   const h = harness({
