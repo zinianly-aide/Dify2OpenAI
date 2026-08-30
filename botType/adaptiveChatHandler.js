@@ -5,6 +5,7 @@ import {
   BackendHealthStore,
   ContextMigrationPlanner,
   DeterministicBackendRouter,
+  hashSessionValue,
 } from '../packages/dify-core/index.js';
 import {
   checkpointManager,
@@ -181,7 +182,7 @@ const adaptiveChatHandler = {
       explicitBackendId: req.headers?.['x-backend-id'] || req.body?.backend_id,
       checkpointAvailable: Boolean(req.body?.checkpoint_available),
       completedToolInputs,
-      user: sessionId,
+      user: `gateway-${hashSessionValue(sessionId)}`,
       stream: false,
     });
 
