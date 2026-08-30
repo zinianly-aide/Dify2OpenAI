@@ -155,8 +155,11 @@ const adaptiveChatHandler = {
     const providerId = String(req.headers?.['x-provider-id'] || 'gateway');
     const appId = String(req.headers?.['x-dify-app-id'] || req.body?.app_id || 'default');
     const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
+    const canonicalMessages = Array.isArray(res.locals?.gatewayOriginalMessages)
+      ? res.locals.gatewayOriginalMessages
+      : messages;
     const tools = Array.isArray(req.body?.tools) ? req.body.tools : [];
-    const completedToolInputs = recordCompletedToolResults({ messages, providerId, appId, sessionId });
+    const completedToolInputs = recordCompletedToolResults({ messages: canonicalMessages, providerId, appId, sessionId });
     const estimatedTokens = Number(res.locals?.gatewayCompressionResult?.afterTokens
       ?? res.locals?.gatewayCompressionResult?.beforeTokens
       ?? req.body?.estimated_tokens
@@ -169,12 +172,13 @@ const adaptiveChatHandler = {
       clientType: String(req.headers?.['x-client-type'] || 'openai-compatible'),
       taskType: String(req.headers?.['x-task-type'] || req.body?.task_type || 'general'),
       messages,
+      canonicalMessages,
       tools,
       estimatedTokens: Number.isFinite(estimatedTokens) ? estimatedTokens : 0,
       contextUtilization: Number.isFinite(contextWindow) && contextWindow > 0 ? estimatedTokens / contextWindow : undefined,
       requiresTools: tools.length > 0,
       toolCount: tools.length,
-      hasImages: hasImages(messages),
+      hasImages: hasImages(canonicalMessages),
       reasoningRequired: explicitBoolean(req.headers?.['x-reasoning-required'] ?? req.body?.reasoning_required),
       streamingRequired: explicitBoolean(req.body?.stream),
       latencyTarget: req.headers?.['x-latency-target'] || req.body?.latency_target,
