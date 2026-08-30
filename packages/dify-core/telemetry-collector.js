@@ -4,6 +4,7 @@ export function createTelemetryRecord(canonicalRequest, decision, result) {
   const compression = result?.compressionResult;
   const reconciliation = result?.backendReconciliation;
   const checkpoint = result?.checkpointRecommendation;
+  const rotation = result?.rotation || {};
   return Object.freeze({
     traceId: canonicalRequest.traceId,
     clientType: canonicalRequest.clientType,
@@ -39,6 +40,17 @@ export function createTelemetryRecord(canonicalRequest, decision, result) {
     backendContextUtilization: reconciliation?.backendContextUtilization ?? null,
     checkpointRecommended: checkpoint?.recommended ?? false,
     checkpointReason: Array.isArray(checkpoint?.reasonCodes) ? [...checkpoint.reasonCodes] : [],
+    checkpointCreated: rotation.checkpointCreated === true,
+    sourceGeneration: rotation.sourceGeneration ?? null,
+    targetGeneration: rotation.targetGeneration ?? null,
+    rotationStarted: rotation.rotationStarted === true,
+    rotationSuccess: rotation.rotationSuccess === true,
+    rotationFailureReason: rotation.rotationFailureReason ?? null,
+    checkpointBeforeTokens: rotation.checkpointBeforeTokens ?? null,
+    checkpointAfterTokens: rotation.checkpointAfterTokens ?? null,
+    oldConversationIdHash: rotation.oldConversationIdHash ?? null,
+    newConversationIdHash: rotation.newConversationIdHash ?? null,
+    backendContextReductionPct: rotation.backendContextReductionPct ?? null,
     compression_passes: compression?.compressionPasses ?? 0,
     compression_target_reached: compression?.targetReached ?? false,
     compression_unable_to_reach_target: compression?.unableToReachTarget ?? false,
@@ -49,6 +61,17 @@ export function createTelemetryRecord(canonicalRequest, decision, result) {
     context_amplification: reconciliation?.contextAmplification ?? null,
     checkpoint_recommended: checkpoint?.recommended ?? false,
     checkpoint_reason: Array.isArray(checkpoint?.reasonCodes) ? [...checkpoint.reasonCodes] : [],
+    checkpoint_created: rotation.checkpointCreated === true,
+    source_generation: rotation.sourceGeneration ?? null,
+    target_generation: rotation.targetGeneration ?? null,
+    rotation_started: rotation.rotationStarted === true,
+    rotation_success: rotation.rotationSuccess === true,
+    rotation_failure_reason: rotation.rotationFailureReason ?? null,
+    checkpoint_before_tokens: rotation.checkpointBeforeTokens ?? null,
+    checkpoint_after_tokens: rotation.checkpointAfterTokens ?? null,
+    old_conversation_id_hash: rotation.oldConversationIdHash ?? null,
+    new_conversation_id_hash: rotation.newConversationIdHash ?? null,
+    backend_context_reduction_pct: rotation.backendContextReductionPct ?? null,
     latencyMs: result?.latencyMs ?? 0,
     firstTokenLatencyMs: result?.firstTokenLatencyMs ?? null,
     retryCount: result?.retryCount ?? 0,
