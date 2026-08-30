@@ -84,7 +84,7 @@ export class DifyAdapter extends LlmAdapter {
           ...payload,
         });
         if (this.logger?.info) this.logger.info(line);
-        else console.log(line);
+        if (!this.logger?.info || process.env.DIFY_TELEMETRY_STDOUT === '1') console.log(line);
       },
     });
   }
@@ -232,9 +232,6 @@ export class DifyAdapter extends LlmAdapter {
     };
 
     try {
-      // DSH intentionally reuses the same SessionId for auxiliary calls such as
-      // session-title and compaction. They are not conversation turns and must
-      // never read, replace, or advance the main Dify downstream cursor.
       if (options.purpose !== undefined) {
         const response = await this.collect(
           app,
