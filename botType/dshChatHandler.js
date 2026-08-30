@@ -45,18 +45,18 @@ async function handleRequest(req,res,config){
  const schema=toolSchemaRegistry.resolve({dshConversationId,providerId,difyAppId,tools:data.tools||[]});recordIncomingToolResults(providerId,dshConversationId,messages);
  const buildQuery=(strategy)=>{let q=strategy==='DELTA_CONTINUE'?deltaHistory(messages):strategy==='TOOL_CONTINUE'?toolContinuation(messages):fullHistory(messages);if(schema.changed&&data.tools?.length)q=`${schemaPrompt(data.tools)}\n\n${q}`;return q;};
  const makeBody=(conversationId,strategy)=>({inputs:{},query:buildQuery(strategy),response_mode:'blocking',conversation_id:conversationId||'',user:String(data.user||dshConversationId),auto_generate_name:false});
- const attachmentsFor=(strategy)=>strategy==='TOOL_CONTINUE'?[]:currentAttachments;
- trace({traceId,dshConversationId,providerId,difyConversationId:remote?.conversationId||'',conversationState:resolved.state,attachmentCount:attachmentsFor(resolved.contextStrategy).length,toolSchemaHash:schema.toolSchemaHash,contextStrategy:resolved.contextStrategy,event:schema.traceEvent});
+ const attachmentsFor=()=>currentAttachments;
+ trace({traceId,dshConversationId,providerId,difyConversationId:remote?.conversationId||'',conversationState:resolved.state,attachmentCount:attachmentsFor().length,toolSchemaHash:schema.toolSchemaHash,contextStrategy:resolved.contextStrategy,event:schema.traceEvent});
  let result;
- try{result=await callDify(config,makeBody(remote?.conversationId,resolved.contextStrategy),attachmentsFor(resolved.contextStrategy));}
+ try{result=await callDify(config,makeBody(remote?.conversationId,resolved.contextStrategy),attachmentsFor());}
  catch(error){responseLocals(res).gatewayErrorType=String(error?.code||'dify_attachment_error');return res.status(error?.status||502).json({error:{message:error?.message||'Dify attachment processing failed',type:'dify_attachment_error',trace_id:traceId}});}
  if(!result.ok&&remote?.conversationId&&isInvalidConversation(result.status,result.raw)){
    conversationStore.invalidate(dshConversationId,providerId,difyAppId);
    resolved=resolveConversationState({remoteState:conversationStore.get(dshConversationId,providerId,difyAppId),messages,remoteInvalid:true});
-   trace({traceId,dshConversationId,providerId,difyConversationId:remote.conversationId,conversationState:ConversationState.RECOVER,attachmentCount:attachmentsFor(resolved.contextStrategy).length,toolSchemaHash:schema.toolSchemaHash,contextStrategy:resolved.contextStrategy});
+   trace({traceId,dshConversationId,providerId,difyConversationId:remote.conversationId,conversationState:ConversationState.RECOVER,attachmentCount:attachmentsFor().length,toolSchemaHash:schema.toolSchemaHash,contextStrategy:resolved.contextStrategy});
    const locals=responseLocals(res);
    locals.gatewayRetryCount=Number(locals.gatewayRetryCount||0)+1;
-   try{result=await callDify(config,makeBody('',resolved.contextStrategy),attachmentsFor(resolved.contextStrategy));}
+   try{result=await callDify(config,makeBody('',resolved.contextStrategy),attachmentsFor());}
    catch(error){locals.gatewayErrorType=String(error?.code||'dify_attachment_error');return res.status(error?.status||502).json({error:{message:error?.message||'Dify attachment processing failed',type:'dify_attachment_error',trace_id:traceId}});}
  }
  if(!result.ok){responseLocals(res).gatewayErrorType='dify_error';return res.status(result.status||502).json({error:{message:result.json?.message||result.raw||'Dify request failed',type:'dify_error',trace_id:traceId}});}
