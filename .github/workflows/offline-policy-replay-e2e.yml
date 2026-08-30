@@ -19,4 +19,4 @@ jobs:
       - name: Install dependencies
         run: npm install --no-audit --no-fund
       - name: Run offline analyzer candidate replay evaluator tests
-        run: node --test tests/offline-policy.test.js tests/tool-optimization.test.js tests/backend-routing.test.js
+        run: node --test tests/offline-policy.test.js tests/offline-policy-guardrails.test.js tests/tool-optimization.test.js tests/backend-routing.test.js
