@@ -68,7 +68,7 @@ test('single pass reaches target', () => {
 test('multiple heavy passes reach target and dispatch representation is final pass', () => {
   const messages = twoPassHeavyMessages();
   const h = harness({
-    compression: { heavySummaryMaxChars: 6000, strongerHeavySummaryMaxChars: 300 },
+    compression: { heavySummaryMaxChars: 14000, strongerHeavySummaryMaxChars: 300 },
     quality: { targetUtilization: 0.68, maxCompressionPasses: 2, minimumSavingsRatio: 0 },
   });
   const result = h.guard.run({ messages, initialProfile: profileFor(messages, 0.91), compressor: h.compressor, profiler: h.profiler });
