@@ -53,7 +53,7 @@ test('client classification covers DSH OpenCode Cline and Codex without changing
   for (const [req, expected] of cases) assert.equal(detectClientType(req), expected);
 });
 
-test('static decision engine always emits reasonCodes and never enables compression', () => {
+test('decision engine emits deterministic policy-driven compression reasons', () => {
   const req = { headers: { 'x-client-type': 'cline' }, body: { messages: [{ role: 'user', content: 'hello' }], tools: [] } };
   const canonical = CanonicalRequest.fromExpress(req, { traceId: 'trace-2', backendId: 'backend-b', contextWindow: 100 });
   const profile = new ContextProfiler().profile(canonical);
@@ -61,8 +61,8 @@ test('static decision engine always emits reasonCodes and never enables compress
   assert.equal(decision.compression, 'none');
   assert.ok(decision.reasonCodes.length >= 4);
   assert.ok(decision.reasonCodes.includes('client=cline'));
-  assert.ok(decision.reasonCodes.includes('policy=static'));
-  assert.ok(decision.reasonCodes.some((code) => code.startsWith('context_utilization=')));
+  assert.ok(decision.reasonCodes.includes('policy=context_compression_v1'));
+  assert.ok(decision.reasonCodes.includes('compression_mode=none'));
 });
 
 test('telemetry collector emits complete sanitized record and GatewayDecisionEvent', () => {
@@ -89,6 +89,7 @@ test('telemetry collector emits complete sanitized record and GatewayDecisionEve
   assert.equal(telemetry.backendId, 'backend-c');
   assert.equal(telemetry.completionTokens, 4);
   assert.equal(telemetry.retryCount, 1);
+  assert.equal(telemetry.compressionMode, 'none');
   assert.equal(emitted.length, 1);
   const serialized = JSON.stringify(emitted[0]);
   assert.equal(serialized.includes('raw-session'), false);
