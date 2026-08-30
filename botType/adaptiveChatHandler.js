@@ -65,6 +65,11 @@ function explicitBoolean(value) {
   return value === true || String(value || '').toLowerCase() === 'true' || String(value || '') === '1';
 }
 
+function csv(value) {
+  if (Array.isArray(value)) return value.map(String).filter(Boolean);
+  return String(value || '').split(',').map((item) => item.trim()).filter(Boolean);
+}
+
 function findToolCall(messages, toolCallId) {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     for (const call of messages[i]?.tool_calls || []) {
@@ -85,6 +90,7 @@ function recordCompletedToolResults({ messages, providerId, appId, sessionId }) 
       appId,
       sessionId,
       toolCallId: String(message.tool_call_id),
+      toolName: String(call.function?.name || call.name || ''),
       arguments: call.function?.arguments ?? call.arguments ?? '{}',
     };
     toolExecutionLedger.complete(input, typeof message.content === 'string' ? message.content : JSON.stringify(message.content ?? ''));
@@ -171,6 +177,8 @@ const adaptiveChatHandler = {
       appId,
       clientType: String(req.headers?.['x-client-type'] || 'openai-compatible'),
       taskType: String(req.headers?.['x-task-type'] || req.body?.task_type || 'general'),
+      taskHints: csv(req.headers?.['x-tool-task-hints'] || req.body?.tool_task_hints),
+      requiredTools: csv(req.headers?.['x-required-tools'] || req.body?.required_tools),
       messages,
       canonicalMessages,
       tools,
@@ -193,6 +201,7 @@ const adaptiveChatHandler = {
     res.locals.gatewayRouting = result.routing;
     res.locals.gatewayMigration = result.migration;
     res.locals.gatewayBackendHealth = result.routing?.backendHealth;
+    res.locals.gatewayToolOptimization = result.toolOptimization;
     const usage = usageOf(result);
     if (usage.prompt_tokens !== undefined || usage.completion_tokens !== undefined) {
       res.locals.gatewayBackendUsage = {
