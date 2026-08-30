@@ -1,6 +1,7 @@
 import z from '@deepseek-ai/schemastery';
 import { assertUsableApiKey, LlmError } from '@deepseek-ai/dsh-llm';
 import { DifyAdapter } from './native-adapter.js';
+import { ToolAttachmentBridge, mergeAttachments } from './tool-attachment-bridge.js';
 
 export { DifyAdapter } from './native-adapter.js';
 
@@ -54,6 +55,7 @@ export function apply(ctx, config) {
   const providerId = String(config.providerId || 'dify').trim();
   if (!providerId) throw new Error('dsh-dify-provider providerId must be non-empty');
   const apps = normalizeApps(config);
+  const toolAttachments = new ToolAttachmentBridge();
 
   const resolveApiKey = async (app) => {
     const ref = String(app.apiKeyEnv || 'DIFY_API_KEY');
@@ -87,5 +89,29 @@ export function apply(ctx, config) {
     logger: ctx.logger,
     compressionConfig: config.compression,
   });
+
+  ctx.on('tools/result', (exec, result) => {
+    try {
+      toolAttachments.capture(exec, result);
+    } catch (error) {
+      if (ctx.logger?.warn) ctx.logger.warn(`dsh-dify-provider ignored malformed read_image attachment: ${String(error?.code || error?.name || 'invalid_attachment')}`);
+    }
+  });
+
+  const collect = adapter.collect.bind(adapter);
+  adapter.collect = async (app, body, signal, attachments = []) => {
+    const pending = toolAttachments.resolve(body?.user, body?.query);
+    const merged = mergeAttachments(attachments, pending.attachments);
+    const response = await collect(app, body, signal, merged);
+    if (pending.callIds.length) toolAttachments.consume(body?.user, pending.callIds);
+    return response;
+  };
+
+  const resetSession = adapter.resetSession.bind(adapter);
+  adapter.resetSession = (sessionId, appId) => {
+    toolAttachments.clearSession(sessionId);
+    return resetSession(sessionId, appId);
+  };
+
   ctx.llm.registerAdapter([providerId], adapter);
 }
