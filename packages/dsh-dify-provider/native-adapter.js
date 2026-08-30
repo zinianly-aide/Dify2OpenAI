@@ -1,9 +1,15 @@
 import { LlmAdapter, LlmError, attributionHeaders } from '@deepseek-ai/dsh-llm';
 import {
+  CanonicalRequest,
+  CanonicalResponse,
+  ContextProfiler,
   ConversationState,
+  DecisionEngine,
   MemoryConversationStore,
+  TelemetryCollector,
   ToolExecutionLedger,
   ToolSchemaRegistry,
+  backendIdFromUrl,
   isInvalidConversationError,
   resolveConversationState,
   sha256,
@@ -42,6 +48,10 @@ function usageOf(metadata) {
   };
 }
 
+function errorType(error) {
+  return String(error?.code || error?.name || 'unknown_error').slice(0, 120);
+}
+
 function ledgerInput(sessionId, providerId, appId, call) {
   return {
     providerId,
@@ -63,6 +73,20 @@ export class DifyAdapter extends LlmAdapter {
     this.conversations = new MemoryConversationStore();
     this.toolSchemas = new ToolSchemaRegistry();
     this.toolLedger = new ToolExecutionLedger();
+    this.contextProfiler = new ContextProfiler();
+    this.decisionEngine = new DecisionEngine();
+    this.telemetry = new TelemetryCollector({
+      sink: (payload) => {
+        const line = JSON.stringify({
+          ts: new Date().toISOString(),
+          component: 'gateway-decision',
+          source: 'dsh-dify-provider',
+          ...payload,
+        });
+        if (this.logger?.info) this.logger.info(line);
+        else console.log(line);
+      },
+    });
   }
 
   providerInfo(provider) {
@@ -95,6 +119,10 @@ export class DifyAdapter extends LlmAdapter {
     this.conversations.resetProvider(String(sessionId), this.providerId, appId);
   }
 
+  telemetrySnapshot() {
+    return this.telemetry.snapshot();
+  }
+
   async collect(app, body, signal) {
     if (!app.baseURL) throw new LlmError(`Dify app "${app.id}" has no baseURL`, 'MISSING_CONFIG');
     const apiKey = await this.resolveApiKey(app);
@@ -103,6 +131,7 @@ export class DifyAdapter extends LlmAdapter {
     let answer = '';
     let conversationId = body.conversation_id || '';
     let usage;
+    let firstTokenAt;
     try {
       for await (const event of streamDifyChat({
         baseURL: app.baseURL,
@@ -113,7 +142,10 @@ export class DifyAdapter extends LlmAdapter {
       })) {
         if (event?.conversation_id) conversationId = String(event.conversation_id);
         if (event?.event === 'message' || event?.event === 'agent_message') {
-          if (typeof event.answer === 'string') answer += event.answer;
+          if (typeof event.answer === 'string') {
+            if (event.answer && firstTokenAt === undefined) firstTokenAt = Date.now();
+            answer += event.answer;
+          }
         } else if (event?.event === 'message_end') {
           usage = usageOf(event.metadata) || usage;
         } else if (event?.event === 'error') {
@@ -127,7 +159,7 @@ export class DifyAdapter extends LlmAdapter {
       if (timeoutSignal.aborted) throw new LlmError(`Dify request timed out after ${this.timeoutMs}ms`, 'DIFY_TIMEOUT', { cause: error });
       throw error;
     }
-    return { answer, conversationId, usage };
+    return { answer, conversationId, usage, firstTokenAt };
   }
 
   queryFor({ messages, system, tools, schema, strategy, providerId, appId }) {
@@ -176,173 +208,220 @@ export class DifyAdapter extends LlmAdapter {
     const messages = options.messages || [];
     assertSupportedMessages(messages);
 
-    // DSH intentionally reuses the same SessionId for auxiliary calls such as
-    // session-title and compaction. They are not conversation turns and must
-    // never read, replace, or advance the main Dify downstream cursor.
-    if (options.purpose !== undefined) {
-      const response = await this.collect(
+    const canonicalRequest = CanonicalRequest.fromDsh(options, {
+      traceId,
+      providerId,
+      backendId: backendIdFromUrl(app.baseURL),
+      model: appId,
+      contextWindow: app.contextWindow,
+    });
+    const contextProfile = this.contextProfiler.profile(canonicalRequest);
+    const decision = this.decisionEngine.decide(canonicalRequest, contextProfile, {
+      backendId: canonicalRequest.backendId,
+      model: appId,
+    });
+    let telemetryRecorded = false;
+    const recordDecision = (fields) => {
+      if (telemetryRecorded) return;
+      telemetryRecorded = true;
+      this.telemetry.collect(canonicalRequest, decision, new CanonicalResponse({
+        latencyMs: Date.now() - startedAt,
+        retryCount: 0,
+        ...fields,
+      }));
+    };
+
+    try {
+      // DSH intentionally reuses the same SessionId for auxiliary calls such as
+      // session-title and compaction. They are not conversation turns and must
+      // never read, replace, or advance the main Dify downstream cursor.
+      if (options.purpose !== undefined) {
+        const response = await this.collect(
+          app,
+          this.bodyFor(sessionId, '', fullHistory(messages, options.system)),
+          options.signal,
+        );
+        emitTrace(this.logger, {
+          traceId,
+          dshSessionIdHash: sessionHash(sessionId),
+          providerId,
+          difyAppId: appId,
+          conversationState: 'AUXILIARY',
+          hasDifyConversationId: false,
+          toolCount: options.tools?.length || 0,
+          toolSchemaChanged: false,
+          toolCallCount: 0,
+          toolResultCount: 0,
+          retryCount: 0,
+          latencyMs: Date.now() - startedAt,
+          status: 'ok',
+          purpose: options.purpose,
+        });
+        recordDecision({
+          success: true,
+          firstTokenLatencyMs: response.firstTokenAt === undefined ? undefined : response.firstTokenAt - startedAt,
+          promptTokens: response.usage?.inputTokens,
+          completionTokens: response.usage?.outputTokens,
+        });
+        if (response.answer) {
+          yield { type: 'block-start', index: 0, blockType: 'text' };
+          yield { type: 'text-delta', index: 0, text: response.answer };
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: response.answer } };
+        }
+        if (response.usage) yield { type: 'usage', usage: response.usage };
+        yield { type: 'finish', reason: { kind: 'stop' } };
+        return;
+      }
+
+      const tools = options.tools || [];
+      const toolResults = tailToolResults(messages);
+      const schema = this.toolSchemas.resolve({ dshConversationId: sessionId, providerId, difyAppId: appId, tools });
+      const resultInputs = this.recordToolResults(sessionId, providerId, appId, messages);
+      let remote = this.conversations.get(sessionId, providerId, appId);
+      let resolved = resolveConversationState({ remoteState: remote, messages, toolResults });
+
+      let retryCount = 0;
+      const request = async (conversationId, strategy) => this.collect(
         app,
-        this.bodyFor(sessionId, '', fullHistory(messages, options.system)),
+        this.bodyFor(sessionId, conversationId, this.queryFor({
+          messages,
+          system: options.system,
+          tools,
+          schema,
+          strategy,
+          providerId,
+          appId,
+        })),
         options.signal,
       );
-      emitTrace(this.logger, {
-        traceId,
-        dshSessionIdHash: sessionHash(sessionId),
-        providerId,
-        difyAppId: appId,
-        conversationState: 'AUXILIARY',
-        hasDifyConversationId: false,
-        toolCount: options.tools?.length || 0,
-        toolSchemaChanged: false,
-        toolCallCount: 0,
-        toolResultCount: 0,
-        retryCount: 0,
-        latencyMs: Date.now() - startedAt,
-        status: 'ok',
-        purpose: options.purpose,
-      });
-      if (response.answer) {
-        yield { type: 'block-start', index: 0, blockType: 'text' };
-        yield { type: 'text-delta', index: 0, text: response.answer };
-        yield { type: 'block-end', index: 0, block: { type: 'text', text: response.answer } };
+
+      let response;
+      try {
+        response = await request(remote?.conversationId || '', resolved.contextStrategy);
+      } catch (error) {
+        if (!(remote?.conversationId && isInvalidConversationError(error))) throw error;
+        retryCount = 1;
+        this.conversations.invalidate(sessionId, providerId, appId);
+        resolved = resolveConversationState({ remoteState: remote, messages, toolResults, remoteInvalid: true });
+        emitTrace(this.logger, {
+          traceId,
+          dshSessionIdHash: sessionHash(sessionId),
+          providerId,
+          difyAppId: appId,
+          conversationState: ConversationState.RECOVER,
+          hasDifyConversationId: true,
+          toolCount: tools.length,
+          toolSchemaChanged: schema.changed,
+          toolCallCount: 0,
+          toolResultCount: toolResults.length,
+          retryCount,
+          latencyMs: Date.now() - startedAt,
+          status: 'recovering',
+        });
+        response = await request('', resolved.contextStrategy);
       }
-      if (response.usage) yield { type: 'usage', usage: response.usage };
-      yield { type: 'finish', reason: { kind: 'stop' } };
-      return;
-    }
 
-    const tools = options.tools || [];
-    const toolResults = tailToolResults(messages);
-    const schema = this.toolSchemas.resolve({ dshConversationId: sessionId, providerId, difyAppId: appId, tools });
-    const resultInputs = this.recordToolResults(sessionId, providerId, appId, messages);
-    let remote = this.conversations.get(sessionId, providerId, appId);
-    let resolved = resolveConversationState({ remoteState: remote, messages, toolResults });
-
-    let retryCount = 0;
-    const request = async (conversationId, strategy) => this.collect(
-      app,
-      this.bodyFor(sessionId, conversationId, this.queryFor({
-        messages,
-        system: options.system,
-        tools,
-        schema,
-        strategy,
-        providerId,
-        appId,
-      })),
-      options.signal,
-    );
-
-    let response;
-    try {
-      response = await request(remote?.conversationId || '', resolved.contextStrategy);
-    } catch (error) {
-      if (!(remote?.conversationId && isInvalidConversationError(error))) throw error;
-      retryCount = 1;
-      this.conversations.invalidate(sessionId, providerId, appId);
-      resolved = resolveConversationState({ remoteState: remote, messages, toolResults, remoteInvalid: true });
-      emitTrace(this.logger, {
-        traceId,
-        dshSessionIdHash: sessionHash(sessionId),
-        providerId,
-        difyAppId: appId,
-        conversationState: ConversationState.RECOVER,
-        hasDifyConversationId: true,
-        toolCount: tools.length,
-        toolSchemaChanged: schema.changed,
-        toolCallCount: 0,
-        toolResultCount: toolResults.length,
-        retryCount,
-        latencyMs: Date.now() - startedAt,
-        status: 'recovering',
-      });
-      response = await request('', resolved.contextStrategy);
-    }
-
-    let conversationId = response.conversationId || remote?.conversationId || '';
-    if (conversationId) {
-      remote = this.conversations.set(sessionId, providerId, appId, {
-        conversationId,
-        valid: true,
-        updatedAt: Date.now(),
-        toolSchemaHash: schema.toolSchemaHash,
-      });
-    }
-    for (const input of resultInputs) this.toolLedger.markForwarded(input);
-
-    let answer = response.answer;
-    let usage = response.usage;
-    let calls = parseToolCalls(answer);
-    let emitted = [];
-    let replayRounds = 0;
-    while (calls.length && replayRounds < 3) {
-      const replay = [];
-      emitted = [];
-      for (const call of calls) {
-        const entry = this.toolLedger.begin(ledgerInput(sessionId, providerId, appId, call));
-        if (entry.replay) replay.push({ call, result: entry.result });
-        else if (!entry.duplicate) emitted.push(call);
-      }
-      if (emitted.length || replay.length === 0) break;
-      replayRounds += 1;
-      retryCount += 1;
-      const replayQuery = replay.map(({ call, result }) => `tool_result tool_call_id=${call.id}: ${result}`).join('\n');
-      const replayResponse = await this.collect(app, this.bodyFor(sessionId, conversationId, replayQuery), options.signal);
-      answer = replayResponse.answer;
-      usage = replayResponse.usage || usage;
-      conversationId = replayResponse.conversationId || conversationId;
+      let conversationId = response.conversationId || remote?.conversationId || '';
       if (conversationId) {
-        this.conversations.set(sessionId, providerId, appId, {
+        remote = this.conversations.set(sessionId, providerId, appId, {
           conversationId,
           valid: true,
           updatedAt: Date.now(),
           toolSchemaHash: schema.toolSchemaHash,
         });
       }
-      calls = parseToolCalls(answer);
-    }
+      for (const input of resultInputs) this.toolLedger.markForwarded(input);
 
-    const gap = messagesAfterOwnAssistant(messages, providerId, appId);
-    const providerSwitch = gap.some((m) => m?.role === 'assistant' && m?.source?.kind === 'model'
-      && (m.source.provider !== providerId || m.source.model !== appId));
-    emitTrace(this.logger, {
-      traceId,
-      dshSessionIdHash: sessionHash(sessionId),
-      providerId,
-      difyAppId: appId,
-      conversationState: resolved.state,
-      hasDifyConversationId: Boolean(conversationId),
-      toolCount: tools.length,
-      toolSchemaChanged: schema.changed,
-      toolCallCount: emitted.length,
-      toolResultCount: toolResults.length,
-      retryCount,
-      latencyMs: Date.now() - startedAt,
-      status: 'ok',
-      ...(providerSwitch ? { providerSwitch: true } : {}),
-    });
-
-    let index = 0;
-    if (emitted.length) {
-      for (const call of emitted) {
-        const current = index++;
-        yield { type: 'block-start', index: current, blockType: 'tool-call' };
-        yield { type: 'tool-call-delta', index: current, id: call.id, name: call.name, argumentsDelta: call.arguments };
-        yield { type: 'block-end', index: current, block: { type: 'tool-call', id: call.id, name: call.name, arguments: call.arguments } };
+      let answer = response.answer;
+      let usage = response.usage;
+      let firstTokenAt = response.firstTokenAt;
+      let calls = parseToolCalls(answer);
+      let emitted = [];
+      let replayRounds = 0;
+      while (calls.length && replayRounds < 3) {
+        const replay = [];
+        emitted = [];
+        for (const call of calls) {
+          const entry = this.toolLedger.begin(ledgerInput(sessionId, providerId, appId, call));
+          if (entry.replay) replay.push({ call, result: entry.result });
+          else if (!entry.duplicate) emitted.push(call);
+        }
+        if (emitted.length || replay.length === 0) break;
+        replayRounds += 1;
+        retryCount += 1;
+        const replayQuery = replay.map(({ call, result }) => `tool_result tool_call_id=${call.id}: ${result}`).join('\n');
+        const replayResponse = await this.collect(app, this.bodyFor(sessionId, conversationId, replayQuery), options.signal);
+        answer = replayResponse.answer;
+        usage = replayResponse.usage || usage;
+        firstTokenAt = firstTokenAt || replayResponse.firstTokenAt;
+        conversationId = replayResponse.conversationId || conversationId;
+        if (conversationId) {
+          this.conversations.set(sessionId, providerId, appId, {
+            conversationId,
+            valid: true,
+            updatedAt: Date.now(),
+            toolSchemaHash: schema.toolSchemaHash,
+          });
+        }
+        calls = parseToolCalls(answer);
       }
-    } else if (answer) {
-      const current = index++;
-      yield { type: 'block-start', index: current, blockType: 'text' };
-      yield { type: 'text-delta', index: current, text: answer };
-      yield { type: 'block-end', index: current, block: { type: 'text', text: answer } };
+
+      const gap = messagesAfterOwnAssistant(messages, providerId, appId);
+      const providerSwitch = gap.some((m) => m?.role === 'assistant' && m?.source?.kind === 'model'
+        && (m.source.provider !== providerId || m.source.model !== appId));
+      emitTrace(this.logger, {
+        traceId,
+        dshSessionIdHash: sessionHash(sessionId),
+        providerId,
+        difyAppId: appId,
+        conversationState: resolved.state,
+        hasDifyConversationId: Boolean(conversationId),
+        toolCount: tools.length,
+        toolSchemaChanged: schema.changed,
+        toolCallCount: emitted.length,
+        toolResultCount: toolResults.length,
+        retryCount,
+        latencyMs: Date.now() - startedAt,
+        status: 'ok',
+        ...(providerSwitch ? { providerSwitch: true } : {}),
+      });
+
+      recordDecision({
+        success: true,
+        retryCount,
+        firstTokenLatencyMs: firstTokenAt === undefined ? undefined : firstTokenAt - startedAt,
+        promptTokens: usage?.inputTokens,
+        completionTokens: usage?.outputTokens,
+      });
+
+      let index = 0;
+      if (emitted.length) {
+        for (const call of emitted) {
+          const current = index++;
+          yield { type: 'block-start', index: current, blockType: 'tool-call' };
+          yield { type: 'tool-call-delta', index: current, id: call.id, name: call.name, argumentsDelta: call.arguments };
+          yield { type: 'block-end', index: current, block: { type: 'tool-call', id: call.id, name: call.name, arguments: call.arguments } };
+        }
+      } else if (answer) {
+        const current = index++;
+        yield { type: 'block-start', index: current, blockType: 'text' };
+        yield { type: 'text-delta', index: current, text: answer };
+        yield { type: 'block-end', index: current, block: { type: 'text', text: answer } };
+      }
+      if (usage) yield { type: 'usage', usage };
+      yield {
+        type: 'finish',
+        reason: { kind: emitted.length ? 'tool-calls' : 'stop' },
+        ...(conversationId ? {
+          replayState: { response: { kind: 'dify', conversationId, providerId, appId } },
+        } : {}),
+      };
+    } catch (error) {
+      recordDecision({
+        success: false,
+        errorType: errorType(error),
+      });
+      throw error;
     }
-    if (usage) yield { type: 'usage', usage };
-    yield {
-      type: 'finish',
-      reason: { kind: emitted.length ? 'tool-calls' : 'stop' },
-      ...(conversationId ? {
-        replayState: { response: { kind: 'dify', conversationId, providerId, appId } },
-      } : {}),
-    };
   }
 }
