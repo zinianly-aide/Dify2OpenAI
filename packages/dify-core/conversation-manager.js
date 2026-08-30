@@ -29,8 +29,7 @@ export class MemoryConversationStore {
 
   _backendId(providerId, difyAppId = '') { return `${providerId}::${difyAppId}`; }
 
-  get(dshConversationId, providerId, difyAppId = '') {
-    const backendId = this._backendId(providerId, difyAppId);
+  get(dshConversationId, providerId, difyAppId = '', backendId = this._backendId(providerId, difyAppId)) {
     const active = this.generations.getActiveGeneration(dshConversationId, backendId, providerId, difyAppId);
     return active ? { ...active, valid: true } : null;
   }
@@ -64,16 +63,15 @@ export class MemoryConversationStore {
     return { ...created, valid: true };
   }
 
-  invalidate(dshConversationId, providerId, difyAppId = '') {
-    const backendId = this._backendId(providerId, difyAppId);
+  invalidate(dshConversationId, providerId, difyAppId = '', backendId = this._backendId(providerId, difyAppId)) {
     const active = this.generations.getActiveGeneration(dshConversationId, backendId, providerId, difyAppId);
     if (!active) return null;
     this.generations.invalidateGeneration(dshConversationId, backendId, providerId, difyAppId, active.generation, 'REMOTE_INVALID');
     return { ...active, valid: false };
   }
 
-  resetProvider(dshConversationId, providerId, difyAppId = '') {
-    return this.generations.archiveActive(dshConversationId, this._backendId(providerId, difyAppId), providerId, difyAppId);
+  resetProvider(dshConversationId, providerId, difyAppId = '', backendId = this._backendId(providerId, difyAppId)) {
+    return this.generations.archiveActive(dshConversationId, backendId, providerId, difyAppId);
   }
 
   getActiveGeneration(dshConversationId, providerId, difyAppId = '', backendId = this._backendId(providerId, difyAppId)) {
