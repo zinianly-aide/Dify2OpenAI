@@ -10,6 +10,13 @@ export function createTelemetryRecord(canonicalRequest, decision, result) {
   const migration = result?.migration || {};
   const toolOptimization = result?.toolOptimization || {};
   const backendHealth = result?.backendHealth || routing.backendHealth;
+  const policySelection = result?.policySelection || {};
+  const guardrail = result?.guardrail || {};
+  const promotion = result?.promotion || {};
+  const rollback = result?.rollback || {};
+  const policyVersion = policySelection.selectedPolicyVersion || routing.policyVersion || decision.policyVersion || canonicalRequest.policyVersion;
+  const guardrailReasonCodes = Array.isArray(guardrail.reasonCodes) ? [...guardrail.reasonCodes] : [];
+  const rollbackReason = Array.isArray(rollback.rollbackReason) ? [...rollback.rollbackReason] : (rollback.rollbackReason ? [String(rollback.rollbackReason)] : []);
   return Object.freeze({
     timestamp: result?.timestamp || new Date().toISOString(),
     traceId: canonicalRequest.traceId,
@@ -89,6 +96,17 @@ export function createTelemetryRecord(canonicalRequest, decision, result) {
     toolRecoverySuccess: toolOptimization.recoverySuccess === true,
     toolSuccessRate: result?.toolSuccessRate ?? null,
     estimatedCost: result?.estimatedCost ?? null,
+    policyVersion,
+    policyAssignment: policySelection.policyAssignment ?? 'ACTIVE_BASELINE',
+    canaryStage: policySelection.canaryStage ?? null,
+    canaryBucket: policySelection.canaryBucket ?? null,
+    promotionEligible: promotion.promotionEligible ?? guardrail.promotionEligible ?? null,
+    promotionBlockedReason: promotion.promotionBlockedReason ?? policySelection.selectionFallbackReason ?? null,
+    guardrailStatus: guardrail.status ?? null,
+    guardrailReasonCodes,
+    rollbackTriggered: rollback.rollbackTriggered === true,
+    rollbackReason,
+    rollbackTargetPolicy: rollback.rollbackTargetPolicy ?? null,
     compression_passes: compression?.compressionPasses ?? 0,
     compression_target_reached: compression?.targetReached ?? false,
     compression_unable_to_reach_target: compression?.unableToReachTarget ?? false,
@@ -133,12 +151,22 @@ export function createTelemetryRecord(canonicalRequest, decision, result) {
     tool_recovery_triggered: toolOptimization.recoveryTriggered === true,
     tool_recovery_reason: toolOptimization.recoveryReason ?? null,
     tool_recovery_success: toolOptimization.recoverySuccess === true,
+    policy_version: policyVersion,
+    policy_assignment: policySelection.policyAssignment ?? 'ACTIVE_BASELINE',
+    canary_stage: policySelection.canaryStage ?? null,
+    canary_bucket: policySelection.canaryBucket ?? null,
+    promotion_eligible: promotion.promotionEligible ?? guardrail.promotionEligible ?? null,
+    promotion_blocked_reason: promotion.promotionBlockedReason ?? policySelection.selectionFallbackReason ?? null,
+    guardrail_status: guardrail.status ?? null,
+    guardrail_reason_codes: guardrailReasonCodes,
+    rollback_triggered: rollback.rollbackTriggered === true,
+    rollback_reason: rollbackReason,
+    rollback_target_policy: rollback.rollbackTargetPolicy ?? null,
     latencyMs: result?.latencyMs ?? 0,
     firstTokenLatencyMs: result?.firstTokenLatencyMs ?? null,
     retryCount: result?.retryCount ?? 0,
     success: result?.success ?? false,
     errorType: result?.errorType ?? null,
-    policyVersion: routing.policyVersion || decision.policyVersion || canonicalRequest.policyVersion,
   });
 }
 
