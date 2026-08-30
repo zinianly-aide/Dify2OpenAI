@@ -16,6 +16,8 @@ export * from './backend-registry.js';
 export * from './backend-health.js';
 export * from './backend-router.js';
 export * from './context-migration.js';
+export * from './backend-executor.js';
+export * from './adaptive-backend-gateway.js';
 export * from './decision-engine.js';
 export * from './decision-event.js';
 export * from './telemetry-collector.js';
