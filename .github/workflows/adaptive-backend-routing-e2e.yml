@@ -1,0 +1,27 @@
+name: Adaptive Backend Routing E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  adaptive-backend-routing-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package.json
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Run adaptive routing core and HTTP E2E
+        run: node --test tests/backend-routing.test.js tests/backend-routing-telemetry.test.js tests/backend-migration.e2e.test.js tests/adaptive-http.e2e.test.js
