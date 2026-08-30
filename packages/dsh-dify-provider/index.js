@@ -15,12 +15,23 @@ const appSchema = z.object({
   contextWindow: z.number().step(1).min(1),
 });
 
+const compressionSchema = z.object({
+  toolPruneThreshold: z.number().min(0).max(1),
+  lightThreshold: z.number().min(0).max(1),
+  heavyThreshold: z.number().min(0).max(1),
+  forceThreshold: z.number().min(0).max(1),
+  preservedRecentTurns: z.number().step(1).min(0),
+  lightSummaryMaxChars: z.number().step(1).min(0),
+  heavySummaryMaxChars: z.number().step(1).min(0),
+});
+
 export const Config = z.object({
   providerId: z.string().default('dify'),
   baseURL: z.string(),
   apiKeyEnv: z.string().default('DIFY_API_KEY'),
   timeoutMs: z.number().step(1).min(1).default(120000),
   apps: z.array(appSchema).min(1),
+  compression: compressionSchema,
 });
 
 function normalizeApps(config) {
@@ -74,6 +85,7 @@ export function apply(ctx, config) {
     resolveApiKey,
     readDshAttachment,
     logger: ctx.logger,
+    compressionConfig: config.compression,
   });
   ctx.llm.registerAdapter([providerId], adapter);
 }
