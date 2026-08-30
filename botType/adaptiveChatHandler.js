@@ -171,6 +171,7 @@ const adaptiveChatHandler = {
       ?? req.body?.estimated_tokens
       ?? 0);
     const contextWindow = Number(req.headers?.['x-context-window'] || req.body?.context_window || 0);
+    const policySelection = res.locals?.gatewayPolicySelection || null;
     const result = await gateway.execute({
       sessionId,
       providerId,
@@ -194,6 +195,8 @@ const adaptiveChatHandler = {
       explicitBackendId: req.headers?.['x-backend-id'] || req.body?.backend_id,
       checkpointAvailable: Boolean(req.body?.checkpoint_available),
       completedToolInputs,
+      policyVersion: policySelection?.selectedPolicyVersion,
+      policyConfig: policySelection?.config || {},
       user: `gateway-${hashSessionValue(sessionId)}`,
       stream: false,
     });
