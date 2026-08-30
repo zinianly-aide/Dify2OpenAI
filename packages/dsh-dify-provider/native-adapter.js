@@ -64,12 +64,13 @@ function ledgerInput(sessionId, providerId, appId, call) {
 }
 
 export class DifyAdapter extends LlmAdapter {
-  constructor({ providerId, apps, timeoutMs = 120000, resolveApiKey, logger }) {
+  constructor({ providerId, apps, timeoutMs = 120000, resolveApiKey, readDshAttachment, logger }) {
     super();
     this.providerId = providerId;
     this.apps = new Map(apps.map((app) => [app.id, Object.freeze({ ...app })]));
     this.timeoutMs = timeoutMs;
     this.resolveApiKey = resolveApiKey;
+    this.readDshAttachment = readDshAttachment;
     this.logger = logger;
     this.conversations = new MemoryConversationStore();
     this.toolSchemas = new ToolSchemaRegistry();
@@ -141,6 +142,7 @@ export class DifyAdapter extends LlmAdapter {
         user: body.user,
         signal: requestSignal,
         headers: attributionHeaders(),
+        readDshAttachment: this.readDshAttachment,
       });
       const requestBody = files.length ? { ...body, files } : body;
       for await (const event of streamDifyChat({
@@ -167,7 +169,8 @@ export class DifyAdapter extends LlmAdapter {
     } catch (error) {
       if (signal?.aborted) throw error;
       if (timeoutSignal.aborted) throw new LlmError(`Dify request timed out after ${this.timeoutMs}ms`, 'DIFY_TIMEOUT', { cause: error });
-      throw error;
+      if (error instanceof LlmError) throw error;
+      throw new LlmError(error?.message || 'Dify attachment processing failed', String(error?.code || 'DIFY_ATTACHMENT_ERROR'), { cause: error });
     }
     return { answer, conversationId, usage, firstTokenAt };
   }
@@ -302,7 +305,7 @@ export class DifyAdapter extends LlmAdapter {
           appId,
         })),
         options.signal,
-        strategy === 'TOOL_CONTINUE' ? [] : currentAttachments,
+        currentAttachments,
       );
 
       let response;
@@ -387,7 +390,7 @@ export class DifyAdapter extends LlmAdapter {
         difyAppId: appId,
         conversationState: resolved.state,
         hasDifyConversationId: Boolean(conversationId),
-        attachmentCount: resolved.contextStrategy === 'TOOL_CONTINUE' ? 0 : currentAttachments.length,
+        attachmentCount: currentAttachments.length,
         toolCount: tools.length,
         toolSchemaChanged: schema.changed,
         toolCallCount: emitted.length,
