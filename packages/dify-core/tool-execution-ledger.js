@@ -16,8 +16,9 @@ export class ToolExecutionLedger {
     }
     return sha256(canonicalJson(args ?? {}));
   }
-  key({ providerId, conversationId, toolCallId, argumentsHash, appId = '' }) {
-    return `${providerId}::${appId}::${conversationId}::${toolCallId}::${argumentsHash}`;
+  key({ providerId, sessionId, conversationId, toolCallId, argumentsHash, appId = '' }) {
+    const stableSessionId = sessionId ?? conversationId;
+    return `${providerId}::${appId}::${stableSessionId}::${toolCallId}::${argumentsHash}`;
   }
   begin(input) {
     const argumentsHash = input.argumentsHash || this.argumentsHash(input.arguments);
