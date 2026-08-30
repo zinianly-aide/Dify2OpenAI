@@ -11,6 +11,7 @@
     "./tool-schema-registry": "./tool-schema-registry.js",
     "./tool-execution-ledger": "./tool-execution-ledger.js",
     "./dify-client": "./dify-client.js",
+    "./attachments": "./attachments.js",
     "./gateway-canonical": "./gateway-canonical.js",
     "./context-profiler": "./context-profiler.js",
     "./decision-engine": "./decision-engine.js",
