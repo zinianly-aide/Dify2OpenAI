@@ -1,4 +1,5 @@
 import { createGatewayDecisionEvent } from './decision-event.js';
+import { DecisionEventStore } from './decision-event-store.js';
 
 export function createTelemetryRecord(canonicalRequest, decision, result) {
   const compression = result?.compressionResult;
@@ -10,8 +11,10 @@ export function createTelemetryRecord(canonicalRequest, decision, result) {
   const toolOptimization = result?.toolOptimization || {};
   const backendHealth = result?.backendHealth || routing.backendHealth;
   return Object.freeze({
+    timestamp: result?.timestamp || new Date().toISOString(),
     traceId: canonicalRequest.traceId,
     clientType: canonicalRequest.clientType,
+    taskType: canonicalRequest.taskType ?? null,
     sessionIdHash: canonicalRequest.sessionIdHash ?? null,
     providerId: canonicalRequest.providerId,
     backendId: decision.backendId,
@@ -24,6 +27,11 @@ export function createTelemetryRecord(canonicalRequest, decision, result) {
     messageCount: canonicalRequest.messageCount,
     toolCount: canonicalRequest.toolCount,
     toolSchemaEstimatedTokens: canonicalRequest.toolSchemaEstimatedTokens,
+    requiresTools: canonicalRequest.requiresTools === true || canonicalRequest.toolCount > 0,
+    hasImages: canonicalRequest.hasImages === true,
+    reasoningRequired: canonicalRequest.reasoningRequired === true,
+    streamingRequired: canonicalRequest.streamingRequired === true,
+    portableContextAvailable: result?.portableContextAvailable ?? null,
     compressionMode: compression?.mode ?? decision.compression ?? 'none',
     compressionBeforeTokens: compression?.beforeTokens ?? canonicalRequest.estimatedPromptTokens,
     compressionAfterTokens: compression?.afterTokens ?? canonicalRequest.estimatedPromptTokens,
@@ -74,10 +82,13 @@ export function createTelemetryRecord(canonicalRequest, decision, result) {
     toolSchemaTokensSaved: toolOptimization.savedTokens ?? 0,
     toolPruningMode: toolOptimization.mode ?? 'SEND_ALL',
     toolPruningConfidence: toolOptimization.confidence ?? null,
+    toolPruningConfidenceScore: toolOptimization.confidenceScore ?? null,
     toolPruningReasonCodes: Array.isArray(toolOptimization.reasonCodes) ? [...toolOptimization.reasonCodes] : [],
     toolRecoveryTriggered: toolOptimization.recoveryTriggered === true,
     toolRecoveryReason: toolOptimization.recoveryReason ?? null,
     toolRecoverySuccess: toolOptimization.recoverySuccess === true,
+    toolSuccessRate: result?.toolSuccessRate ?? null,
+    estimatedCost: result?.estimatedCost ?? null,
     compression_passes: compression?.compressionPasses ?? 0,
     compression_target_reached: compression?.targetReached ?? false,
     compression_unable_to_reach_target: compression?.unableToReachTarget ?? false,
@@ -136,6 +147,7 @@ export class TelemetryCollector {
     this.sink = options.sink || ((payload) => console.log(JSON.stringify({ component: 'gateway-decision', ...payload })));
     this.events = [];
     this.records = [];
+    this.decisionEventStore = options.decisionEventStore || new DecisionEventStore();
   }
 
   collect(canonicalRequest, decision, result) {
@@ -143,16 +155,18 @@ export class TelemetryCollector {
     const telemetry = createTelemetryRecord(canonicalRequest, decision, result);
     this.events.push(event);
     this.records.push(telemetry);
+    const storedDecisionEvent = this.decisionEventStore.append(telemetry);
     this.sink({ event, telemetry });
-    return { event, telemetry };
+    return { event, telemetry, storedDecisionEvent };
   }
 
   snapshot() {
-    return { events: [...this.events], records: [...this.records] };
+    return { events: [...this.events], records: [...this.records], decisionDataset: this.decisionEventStore.snapshot() };
   }
 
   clear() {
     this.events.length = 0;
     this.records.length = 0;
+    this.decisionEventStore.clear();
   }
 }
