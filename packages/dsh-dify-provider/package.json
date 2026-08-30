@@ -24,7 +24,7 @@
     }
   },
   "dependencies": {
-    "@zinianly-aide/dify-core": "file:../dify-core"
+    "@zinianly-aide/dify-core": "workspace:*"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
