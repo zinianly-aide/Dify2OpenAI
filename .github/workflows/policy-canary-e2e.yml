@@ -18,5 +18,12 @@ jobs:
           cache-dependency-path: package.json
       - name: Install dependencies
         run: npm install --no-audit --no-fund
-      - name: Run policy registry canary guardrail promotion rollback tests
-        run: node --test tests/policy-canary.test.js tests/offline-policy.test.js tests/backend-routing.test.js tests/tool-optimization.test.js
+      - name: Run final policy canary lifecycle and production runtime tests
+        run: >-
+          node --test
+          tests/policy-canary.test.js
+          tests/policy-canary-final.test.js
+          tests/policy-runtime-http.e2e.test.js
+          tests/offline-policy.test.js
+          tests/backend-routing.test.js
+          tests/tool-optimization.test.js
