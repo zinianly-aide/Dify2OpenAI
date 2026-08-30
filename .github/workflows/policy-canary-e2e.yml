@@ -23,6 +23,7 @@ jobs:
           node --test
           tests/policy-canary.test.js
           tests/policy-canary-final.test.js
+          tests/policy-promotion-atomicity.test.js
           tests/policy-runtime-http.e2e.test.js
           tests/policy-telemetry-failure.test.js
           tests/offline-policy.test.js
