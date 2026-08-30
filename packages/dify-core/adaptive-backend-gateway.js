@@ -1,6 +1,6 @@
-import { BackendContextMode } from './backend-registry.js';
+import { BackendContextMode, BackendRegistry } from './backend-registry.js';
 import { BackendHealthState } from './backend-health.js';
-import { isFallbackEligible } from './backend-router.js';
+import { DeterministicBackendRouter, isFallbackEligible } from './backend-router.js';
 import { assertNoCrossBackendConversationReuse } from './context-migration.js';
 import { ToolSchemaRegistry } from './tool-schema-registry.js';
 import {
@@ -48,6 +48,52 @@ function toolReplayMessages(ledger, requests = [], existingMessages = []) {
   return out;
 }
 
+function policyRegistry(baseRegistry, policyConfig = {}) {
+  const priorities = policyConfig.backendPriority || {};
+  if (!Object.keys(priorities).length) return baseRegistry;
+  const entries = baseRegistry.list({ enabledOnly: false }).map((backend) => ({
+    backendId: backend.backendId,
+    providerType: backend.providerType,
+    baseUrl: backend.baseUrl,
+    model: backend.model,
+    enabled: backend.enabled,
+    priority: priorities[backend.backendId] ?? backend.priority,
+    credentialEnv: backend.credentialEnv,
+    maxContextWindow: backend.capabilities.maxContextWindow,
+    supportsTools: backend.capabilities.supportsTools,
+    supportsVision: backend.capabilities.supportsVision,
+    supportsStreaming: backend.capabilities.supportsStreaming,
+    supportsReasoning: backend.capabilities.supportsReasoning,
+    statefulContext: backend.capabilities.contextMode === BackendContextMode.STATEFUL,
+    costTier: backend.capabilities.costTier,
+  }));
+  return new BackendRegistry(entries);
+}
+
+function policyHealthView(healthStore, policyConfig = {}) {
+  const overrides = policyConfig.backendHealth || {};
+  if (!healthStore || !Object.keys(overrides).length) return healthStore;
+  const baseConfig = healthStore.config || {};
+  const config = { ...baseConfig, ...overrides };
+  return Object.freeze({
+    get(backendId) {
+      const snapshot = healthStore.get(backendId);
+      let state;
+      if (snapshot.consecutiveFailures >= Number(config.unavailableConsecutiveFailures ?? 3)
+        || (snapshot.sampleCount >= Number(config.minimumSamples ?? 4) && snapshot.recentFailureRate >= Number(config.unavailableFailureRate ?? 0.60))) {
+        state = BackendHealthState.UNAVAILABLE;
+      } else if (snapshot.sampleCount >= Number(config.minimumSamples ?? 4)
+        && (snapshot.recentFailureRate >= Number(config.degradedFailureRate ?? 0.25)
+          || snapshot.timeoutRate >= Number(config.degradedTimeoutRate ?? 0.20))) {
+        state = BackendHealthState.DEGRADED;
+      } else {
+        state = BackendHealthState.HEALTHY;
+      }
+      return Object.freeze({ ...snapshot, state });
+    },
+  });
+}
+
 export class AdaptiveBackendGateway {
   constructor({
     registry, router, migrationPlanner, conversationStore, checkpointManager, healthStore, toolLedger, executor,
@@ -84,13 +130,29 @@ export class AdaptiveBackendGateway {
       : requestMessages;
     const availableTools = Array.isArray(input.tools) ? input.tools : [];
     const currentBackendId = input.currentBackendId || this.affinityStore.get(sessionId, providerId, appId) || null;
-    const routing = this.router.decide({ ...input, currentBackendId });
+    const selectedPolicyVersion = String(input.policyVersion || this.router.policyVersion || 'deterministic-backend-router-v1');
+    const selectedPolicyConfig = input.policyConfig || {};
+    const routingRegistry = policyRegistry(this.registry, selectedPolicyConfig);
+    const routingHealth = policyHealthView(this.healthStore, selectedPolicyConfig);
+    const router = routingRegistry === this.registry && routingHealth === this.healthStore && !input.policyVersion
+      ? this.router
+      : new DeterministicBackendRouter({ registry: routingRegistry, healthStore: routingHealth, policyVersion: selectedPolicyVersion });
+    const routing = router.decide({ ...input, currentBackendId, backendHealth: routingHealth });
     if (!routing.backendId) {
       const error = new Error('NO_COMPATIBLE_BACKEND');
       error.code = 'NO_COMPATIBLE_BACKEND';
       error.routing = routing;
       throw error;
     }
+
+    const toolConfidenceThreshold = Number(selectedPolicyConfig.tool?.pruningConfidenceThreshold);
+    const toolRelevancePolicy = Number.isFinite(toolConfidenceThreshold)
+      ? new ToolRelevancePolicy({ pruningConfidenceThreshold: toolConfidenceThreshold })
+      : this.toolRelevancePolicy;
+    const recoveryLimit = Number(selectedPolicyConfig.tool?.recoveryLimit);
+    const toolRecovery = Number.isFinite(recoveryLimit)
+      ? new ToolRecovery({ maxRecoveries: recoveryLimit })
+      : this.toolRecovery;
 
     const attempted = [];
     const candidates = [routing.backendId, ...routing.fallbackChain];
@@ -184,7 +246,7 @@ export class AdaptiveBackendGateway {
       for (const completed of input.completedToolInputs || []) {
         if (completed.toolName) this.toolUsageProfiler.recordOutcome(scope, { toolName: completed.toolName, success: true });
       }
-      const policyResult = this.toolRelevancePolicy.classify({
+      const policyResult = toolRelevancePolicy.classify({
         canonicalRequest: { clientType: input.clientType, taskType: input.taskType },
         tools: availableTools,
         profile: priorProfile,
@@ -234,9 +296,9 @@ export class AdaptiveBackendGateway {
             signal: input.signal,
           });
         } catch (firstError) {
-          if (!this.toolRecovery.shouldRecover({ error: firstError, pruningResult: pruning, recoveryCount })) throw firstError;
+          if (!toolRecovery.shouldRecover({ error: firstError, pruningResult: pruning, recoveryCount })) throw firstError;
           recoveryCount += 1;
-          const recovery = this.toolRecovery.decision(firstError);
+          const recovery = toolRecovery.decision(firstError);
           toolOptimization.recoveryTriggered = true;
           toolOptimization.recoveryReason = recovery.reason;
           this.toolSchemaRegistry.resolve({
@@ -300,8 +362,8 @@ export class AdaptiveBackendGateway {
             reasonCodes: routing.reasonCodes,
             fallbackChain: routing.fallbackChain,
             fallbackUsed,
-            policyVersion: routing.policyVersion,
-            backendHealth: this.healthStore?.get?.(backendId) || { state: BackendHealthState.HEALTHY },
+            policyVersion: selectedPolicyVersion,
+            backendHealth: routingHealth?.get?.(backendId) || { state: BackendHealthState.HEALTHY },
           }),
           migration: Object.freeze({
             started: migrationRequired,
@@ -336,6 +398,7 @@ export class AdaptiveBackendGateway {
             reasonCodes: routing.reasonCodes,
             fallbackChain: routing.fallbackChain,
             fallbackUsed,
+            policyVersion: selectedPolicyVersion,
           };
           error.migration = {
             started: migrationRequired,
