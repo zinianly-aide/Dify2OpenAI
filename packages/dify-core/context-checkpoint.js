@@ -90,6 +90,7 @@ export class CanonicalContextBuilder {
       metadata.decisions.length ? `Important decisions:\n${metadata.decisions.join('\n')}` : '',
     ].filter(Boolean).join('\n\n').slice(0, this.summaryMaxChars);
     const taskGoals = currentTask ? [textOf(currentTask.content)].filter(Boolean) : [];
+    const recentWithoutInstructions = recentMessages.filter((m) => m?.role !== 'system' && m?.role !== 'developer');
     return Object.freeze({
       summary: deterministicSummary,
       recentMessages: Object.freeze([...recentMessages]),
@@ -101,13 +102,15 @@ export class CanonicalContextBuilder {
       pendingToolState,
       instructions: Object.freeze([...instructions]),
       currentTask: currentTask || null,
-      estimatedTokens: estimateConversationTokens([...instructions, ...(deterministicSummary ? [{ role: 'assistant', gatewayCheckpointSummary: true, content: deterministicSummary }] : []), ...recentMessages], tools, system),
+      estimatedTokens: estimateConversationTokens([...instructions, ...(deterministicSummary ? [{ role: 'assistant', gatewayCheckpointSummary: true, content: deterministicSummary }] : []), ...recentWithoutInstructions], tools, system),
     });
   }
 
   bootstrapMessages(checkpoint) {
     const recent = Array.isArray(checkpoint?.recentMessages) ? checkpoint.recentMessages : [];
-    const instructions = recent.filter((m) => m?.role === 'system' || m?.role === 'developer');
+    const instructions = Array.isArray(checkpoint?.instructions)
+      ? checkpoint.instructions
+      : recent.filter((m) => m?.role === 'system' || m?.role === 'developer');
     const nonInstructions = recent.filter((m) => m?.role !== 'system' && m?.role !== 'developer');
     return [
       ...instructions,
@@ -162,6 +165,8 @@ export class CheckpointManager {
       unresolvedErrors: built.unresolvedErrors,
       importantDecisions: built.importantDecisions,
       pendingToolState: built.pendingToolState,
+      instructions: built.instructions,
+      currentTask: built.currentTask,
       estimatedTokensBefore: Number(compressionResult?.beforeTokens || 0),
       estimatedTokensAfter: Number(built.estimatedTokens || compressionResult?.afterTokens || 0),
       reasonCodes: Object.freeze([...reasonCodes]),
