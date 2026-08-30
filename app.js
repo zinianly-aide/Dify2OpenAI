@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { log } from './config/logger.js';
 import chatHandler from "./botType/chatHandler.js";
 import dshChatHandler from "./botType/dshChatHandler.js";
+import adaptiveChatHandler, { adaptiveRoutingConfigured } from "./botType/adaptiveChatHandler.js";
 import completionHandler from "./botType/completionHandler.js";
 import workflowHandler from "./botType/workflowHandler.js";
 import { logRequest, generateId } from "./botType/utils.js";
@@ -53,14 +54,25 @@ app.use(express.json({limit:"100mb"}));
 app.use(express.urlencoded({limit:"100mb",extended:true}));
 
 app.get("/", (req,res)=>res.sendFile(path.join(__dirname,'public/index.html')));
-app.get("/v1/models", (req,res)=>res.json({object:"list",data:[{id:"dify",object:"model",owned_by:"dify",permission:null,capabilities:{vision:true,file_processing:true,tools:true,conversation_lifecycle:true,context_compression:true,context_checkpoint:true,conversation_generations:true}}]}));
-app.get("/capabilities", (req,res)=>res.json({openai_compatible:true,chat_completions:true,tools:true,tool_call_id_correlation:true,provider_scoped_conversations:true,conversation_lifecycle_activation:"x-dsh-conversation-id",legacy_chat_fallback:true,conversation_states:["BOOTSTRAP","CONTINUE","TOOL_CONTINUE","RECOVER","RESET","CHECKPOINT","ROTATE","ROTATE_BOOTSTRAP"],context_strategies:["FULL_BOOTSTRAP","DELTA_CONTINUE","TOOL_CONTINUE","RECOVERY_BOOTSTRAP","CHECKPOINT_BOOTSTRAP"],backend_generation_states:["BOOTSTRAPPING","ACTIVE","CHECKPOINTED","INVALID","ARCHIVED"],tool_schema_hashing:"sha256",tool_execution_idempotency:true,decision_telemetry:true,decision_policy:"gateway-context-compression-v1",context_compression:true,context_compression_modes:["none","tool_prune","light","heavy"],context_compression_configurable:true,context_checkpoint:true,backend_conversation_generations:true,two_phase_rotation:true,automatic_threshold_tuning:false,automatic_routing:false,automatic_optimization:false}));
+app.get("/v1/models", (req,res)=>res.json({object:"list",data:[{id:"dify",object:"model",owned_by:"dify",permission:null,capabilities:{vision:true,file_processing:true,tools:true,conversation_lifecycle:true,context_compression:true,context_checkpoint:true,conversation_generations:true,backend_registry:true,deterministic_backend_routing:true,context_migration:true}}]}));
+app.get("/capabilities", (req,res)=>res.json({openai_compatible:true,chat_completions:true,tools:true,tool_call_id_correlation:true,provider_scoped_conversations:true,conversation_lifecycle_activation:"x-dsh-conversation-id",legacy_chat_fallback:true,conversation_states:["BOOTSTRAP","CONTINUE","TOOL_CONTINUE","RECOVER","RESET","CHECKPOINT","ROTATE","ROTATE_BOOTSTRAP"],context_strategies:["FULL_BOOTSTRAP","DELTA_CONTINUE","TOOL_CONTINUE","RECOVERY_BOOTSTRAP","CHECKPOINT_BOOTSTRAP"],backend_generation_states:["BOOTSTRAPPING","ACTIVE","CHECKPOINTED","INVALID","ARCHIVED"],tool_schema_hashing:"sha256",tool_execution_idempotency:true,decision_telemetry:true,decision_policy:"gateway-context-compression-v1",context_compression:true,context_compression_modes:["none","tool_prune","light","heavy"],context_compression_configurable:true,context_checkpoint:true,backend_conversation_generations:true,two_phase_rotation:true,backend_registry:true,backend_provider_types:["dify","openai-compatible","local-openai-compatible"],backend_health_states:["HEALTHY","DEGRADED","UNAVAILABLE"],deterministic_backend_routing:true,routing_policy:"deterministic-backend-router-v1",context_migration:true,stateful_and_stateless_backends:true,deterministic_fallback:true,adaptive_routing_configured:adaptiveRoutingConfigured(),ml_routing:false,policy_learning:false,llm_policy_mutation:false,canary:false,automatic_threshold_tuning:false,automatic_optimization:false}));
 
 app.post("/v1/chat/completions", async (req,res)=>{
   const requestId=generateId(); const startTime=Date.now(); logRequest(req,requestId);
   const authHeader=req.headers.authorization;
   if(!authHeader) return res.status(401).json({error:"Missing Authorization header"});
   try {
+    if (adaptiveRoutingConfigured()) {
+      gatewayObserver.observe(req,res,{
+        traceId:requestId,
+        providerId:String(req.headers['x-provider-id']||'gateway'),
+        backendId:'adaptive-router',
+        model:req.body?.model,
+      });
+      await adaptiveChatHandler.handleRequest(req,res,requestId,startTime);
+      return;
+    }
+
     const config=parseConfig(authHeader,req.body.model);
     gatewayObserver.observe(req,res,{
       traceId:requestId,
@@ -76,9 +88,12 @@ app.post("/v1/chat/completions", async (req,res)=>{
     else if(config.BOT_TYPE==="Workflow") await workflowHandler.handleRequest(req,res,config,requestId,startTime);
     else throw new Error("Invalid bot type in configuration.");
   } catch(error) {
-    res.locals.gatewayErrorType=error?.name||'gateway_error';
-    log("error","处理请求时发生错误",{requestId,error:{message:error.message,name:error.name}});
-    if(!res.headersSent) res.status(500).json({error:error.message});
+    res.locals ??= {};
+    res.locals.gatewayErrorType=error?.code||error?.name||'gateway_error';
+    if (error?.routing) res.locals.gatewayRouting=error.routing;
+    if (error?.migration) res.locals.gatewayMigration=error.migration;
+    log("error","处理请求时发生错误",{requestId,error:{message:error.message,name:error.name,code:error.code}});
+    if(!res.headersSent) res.status(error?.status || (error?.code === 'MIGRATION_BLOCKED_NO_PORTABLE_CONTEXT' ? 409 : 500)).json({error:error.message});
   }
 });
 
