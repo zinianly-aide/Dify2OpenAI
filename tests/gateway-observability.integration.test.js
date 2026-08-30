@@ -89,7 +89,7 @@ test('integration: SSE request produces sanitized decision event with latency an
 test('integration: high-utilization OpenAI request is compressed before downstream handler sees it', async () => {
   const emitted = [];
   const telemetry = new TelemetryCollector({ sink: (payload) => emitted.push(payload) });
-  const observer = new GatewayObserver({ telemetry });
+  const observer = new GatewayObserver({ telemetry, compressionConfig: { preservedRecentTurns: 1 } });
   const old = 'redundant historical context '.repeat(1200);
   const req = {
     headers: {
