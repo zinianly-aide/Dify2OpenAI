@@ -1,0 +1,22 @@
+name: Tool Optimization E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tool-optimization-e2e:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package.json
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Run deterministic tool optimization tests
+        run: node --test tests/tool-optimization.test.js tests/tool-recovery.e2e.test.js tests/tool-optimization-telemetry.test.js
