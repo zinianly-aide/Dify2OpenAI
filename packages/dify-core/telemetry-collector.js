@@ -5,6 +5,9 @@ export function createTelemetryRecord(canonicalRequest, decision, result) {
   const reconciliation = result?.backendReconciliation;
   const checkpoint = result?.checkpointRecommendation;
   const rotation = result?.rotation || {};
+  const routing = result?.routing || {};
+  const migration = result?.migration || {};
+  const backendHealth = result?.backendHealth || routing.backendHealth;
   return Object.freeze({
     traceId: canonicalRequest.traceId,
     clientType: canonicalRequest.clientType,
@@ -51,6 +54,18 @@ export function createTelemetryRecord(canonicalRequest, decision, result) {
     oldConversationIdHash: rotation.oldConversationIdHash ?? null,
     newConversationIdHash: rotation.newConversationIdHash ?? null,
     backendContextReductionPct: rotation.backendContextReductionPct ?? null,
+    routingSelectedBackend: routing.selectedBackend ?? routing.backendId ?? null,
+    routingPreviousBackend: routing.previousBackend ?? null,
+    routingMigrationRequired: routing.migrationRequired === true,
+    routingReasonCodes: Array.isArray(routing.reasonCodes) ? [...routing.reasonCodes] : [],
+    routingFallbackChain: Array.isArray(routing.fallbackChain) ? [...routing.fallbackChain] : [],
+    routingFallbackUsed: routing.fallbackUsed === true,
+    backendHealth: backendHealth?.state ?? backendHealth ?? null,
+    migrationStarted: migration.started === true,
+    migrationSuccess: migration.success === true,
+    migrationFailureReason: migration.failureReason ?? null,
+    sourceBackend: migration.sourceBackendId ?? routing.previousBackend ?? null,
+    targetBackend: migration.targetBackendId ?? routing.selectedBackend ?? routing.backendId ?? null,
     compression_passes: compression?.compressionPasses ?? 0,
     compression_target_reached: compression?.targetReached ?? false,
     compression_unable_to_reach_target: compression?.unableToReachTarget ?? false,
@@ -72,12 +87,24 @@ export function createTelemetryRecord(canonicalRequest, decision, result) {
     old_conversation_id_hash: rotation.oldConversationIdHash ?? null,
     new_conversation_id_hash: rotation.newConversationIdHash ?? null,
     backend_context_reduction_pct: rotation.backendContextReductionPct ?? null,
+    routing_selected_backend: routing.selectedBackend ?? routing.backendId ?? null,
+    routing_previous_backend: routing.previousBackend ?? null,
+    routing_migration_required: routing.migrationRequired === true,
+    routing_reason_codes: Array.isArray(routing.reasonCodes) ? [...routing.reasonCodes] : [],
+    routing_fallback_chain: Array.isArray(routing.fallbackChain) ? [...routing.fallbackChain] : [],
+    routing_fallback_used: routing.fallbackUsed === true,
+    backend_health: backendHealth?.state ?? backendHealth ?? null,
+    migration_started: migration.started === true,
+    migration_success: migration.success === true,
+    migration_failure_reason: migration.failureReason ?? null,
+    source_backend: migration.sourceBackendId ?? routing.previousBackend ?? null,
+    target_backend: migration.targetBackendId ?? routing.selectedBackend ?? routing.backendId ?? null,
     latencyMs: result?.latencyMs ?? 0,
     firstTokenLatencyMs: result?.firstTokenLatencyMs ?? null,
     retryCount: result?.retryCount ?? 0,
     success: result?.success ?? false,
     errorType: result?.errorType ?? null,
-    policyVersion: decision.policyVersion || canonicalRequest.policyVersion,
+    policyVersion: routing.policyVersion || decision.policyVersion || canonicalRequest.policyVersion,
   });
 }
 
