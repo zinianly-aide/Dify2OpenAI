@@ -2,19 +2,25 @@ import { LlmAdapter, LlmError, attributionHeaders } from '@deepseek-ai/dsh-llm';
 import {
   CanonicalRequest,
   CanonicalResponse,
+  CheckpointRecommendation,
   CompressionPolicy,
+  CompressionQualityGuard,
   ContextCompressor,
   ContextProfiler,
   ConversationState,
   DecisionEngine,
+  DifyUsageExtractor,
   MemoryConversationStore,
   TelemetryCollector,
   ToolExecutionLedger,
   ToolSchemaRegistry,
   backendIdFromUrl,
+  checkpointRecommendationConfigFromEnv,
   compressionConfigFromEnv,
+  compressionQualityConfigFromEnv,
   currentImageAttachments,
   isInvalidConversationError,
+  reconcileBackendContext,
   resolveConversationState,
   resolveDifyFiles,
   sha256,
@@ -38,16 +44,16 @@ const n = (value) => {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 };
 
+const difyUsageExtractor = new DifyUsageExtractor();
+
 function usageOf(metadata) {
+  const extracted = difyUsageExtractor.extract({ metadata });
   const raw = metadata?.usage;
-  if (!raw) return undefined;
-  const inputTokens = n(raw.prompt_tokens);
-  const outputTokens = n(raw.completion_tokens);
-  const totalTokens = n(raw.total_tokens);
-  if (inputTokens === undefined && outputTokens === undefined && totalTokens === undefined) return undefined;
+  if (!extracted && !raw) return undefined;
+  const totalTokens = n(raw?.total_tokens);
   return {
-    inputTokens: inputTokens ?? 0,
-    outputTokens: outputTokens ?? 0,
+    inputTokens: extracted?.backendPromptTokens ?? 0,
+    outputTokens: extracted?.backendCompletionTokens ?? 0,
     ...(totalTokens === undefined ? {} : { totalTokens }),
   };
 }
@@ -67,7 +73,17 @@ function ledgerInput(sessionId, providerId, appId, call) {
 }
 
 export class DifyAdapter extends LlmAdapter {
-  constructor({ providerId, apps, timeoutMs = 120000, resolveApiKey, readDshAttachment, logger, compressionConfig }) {
+  constructor({
+    providerId,
+    apps,
+    timeoutMs = 120000,
+    resolveApiKey,
+    readDshAttachment,
+    logger,
+    compressionConfig,
+    compressionQualityConfig,
+    checkpointRecommendationConfig,
+  }) {
     super();
     this.providerId = providerId;
     this.apps = new Map(apps.map((app) => [app.id, Object.freeze({ ...app })]));
@@ -81,6 +97,12 @@ export class DifyAdapter extends LlmAdapter {
     this.contextProfiler = new ContextProfiler();
     const compressionPolicy = new CompressionPolicy(compressionConfig || compressionConfigFromEnv());
     this.contextCompressor = new ContextCompressor({ policy: compressionPolicy });
+    this.compressionQualityGuard = new CompressionQualityGuard({
+      config: compressionQualityConfig || compressionQualityConfigFromEnv(),
+    });
+    this.checkpointRecommendation = new CheckpointRecommendation({
+      config: checkpointRecommendationConfig || checkpointRecommendationConfigFromEnv(),
+    });
     this.decisionEngine = new DecisionEngine({ compressionPolicy });
     this.telemetry = new TelemetryCollector({
       sink: (payload) => {
@@ -238,21 +260,35 @@ export class DifyAdapter extends LlmAdapter {
       backendId: canonicalRequest.backendId,
       model: appId,
     });
-    const compression = this.contextCompressor.compress({
+    const compression = this.compressionQualityGuard.run({
       messages: originalMessages,
       tools: options.tools || [],
       system: options.system,
-      profile: contextProfile,
+      initialProfile: contextProfile,
+      compressor: this.contextCompressor,
+      profiler: this.contextProfiler,
     });
     const messages = compression.messages;
     let telemetryRecorded = false;
     const recordDecision = (fields) => {
       if (telemetryRecorded) return;
       telemetryRecorded = true;
+      const backendReconciliation = reconcileBackendContext({
+        gatewayEstimatedInputTokens: canonicalRequest.estimatedPromptTokens,
+        gatewayCompressedTokens: compression.result.afterTokens,
+        backendPromptTokens: fields.backendPromptTokens ?? fields.promptTokens,
+        backendCompletionTokens: fields.backendCompletionTokens ?? fields.completionTokens,
+      });
+      const checkpoint = this.checkpointRecommendation.recommend({
+        compressionResult: compression.result,
+        reconciliation: backendReconciliation,
+      });
       this.telemetry.collect(canonicalRequest, decision, new CanonicalResponse({
         latencyMs: Date.now() - startedAt,
         retryCount: 0,
         compressionResult: compression.result,
+        backendReconciliation,
+        checkpointRecommendation: checkpoint,
         ...fields,
       }));
     };
@@ -279,6 +315,9 @@ export class DifyAdapter extends LlmAdapter {
           toolResultCount: 0,
           compressionMode: compression.result.mode,
           compressionSavedTokens: compression.result.savedTokens,
+          compressionPasses: compression.result.compressionPasses,
+          compressionTargetReached: compression.result.targetReached,
+          compressionUnableToReachTarget: compression.result.unableToReachTarget,
           retryCount: 0,
           latencyMs: Date.now() - startedAt,
           status: 'ok',
@@ -289,6 +328,8 @@ export class DifyAdapter extends LlmAdapter {
           firstTokenLatencyMs: response.firstTokenAt === undefined ? undefined : response.firstTokenAt - startedAt,
           promptTokens: response.usage?.inputTokens,
           completionTokens: response.usage?.outputTokens,
+          backendPromptTokens: response.usage?.inputTokens,
+          backendCompletionTokens: response.usage?.outputTokens,
         });
         if (response.answer) {
           yield { type: 'block-start', index: 0, blockType: 'text' };
@@ -345,6 +386,9 @@ export class DifyAdapter extends LlmAdapter {
           toolResultCount: toolResults.length,
           compressionMode: compression.result.mode,
           compressionSavedTokens: compression.result.savedTokens,
+          compressionPasses: compression.result.compressionPasses,
+          compressionTargetReached: compression.result.targetReached,
+          compressionUnableToReachTarget: compression.result.unableToReachTarget,
           retryCount,
           latencyMs: Date.now() - startedAt,
           status: 'recovering',
@@ -416,6 +460,9 @@ export class DifyAdapter extends LlmAdapter {
         compressionBeforeTokens: compression.result.beforeTokens,
         compressionAfterTokens: compression.result.afterTokens,
         compressionSavedTokens: compression.result.savedTokens,
+        compressionPasses: compression.result.compressionPasses,
+        compressionTargetReached: compression.result.targetReached,
+        compressionUnableToReachTarget: compression.result.unableToReachTarget,
         retryCount,
         latencyMs: Date.now() - startedAt,
         status: 'ok',
@@ -428,6 +475,8 @@ export class DifyAdapter extends LlmAdapter {
         firstTokenLatencyMs: firstTokenAt === undefined ? undefined : firstTokenAt - startedAt,
         promptTokens: usage?.inputTokens,
         completionTokens: usage?.outputTokens,
+        backendPromptTokens: usage?.inputTokens,
+        backendCompletionTokens: usage?.outputTokens,
       });
 
       let index = 0;
