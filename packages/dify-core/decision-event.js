@@ -2,6 +2,7 @@ export function createGatewayDecisionEvent(canonicalRequest, decision, result) {
   const compression = result?.compressionResult;
   const reconciliation = result?.backendReconciliation;
   const checkpoint = result?.checkpointRecommendation;
+  const rotation = result?.rotation;
   return Object.freeze({
     traceId: canonicalRequest.traceId,
     ...(canonicalRequest.sessionIdHash === undefined ? {} : { sessionIdHash: canonicalRequest.sessionIdHash }),
@@ -39,6 +40,21 @@ export function createGatewayDecisionEvent(canonicalRequest, decision, result) {
     } : {}),
     ...(reconciliation ? { backendContext: { ...reconciliation } } : {}),
     ...(checkpoint ? { checkpointRecommendation: { recommended: checkpoint.recommended, reasonCodes: [...checkpoint.reasonCodes] } } : {}),
+    ...(rotation ? {
+      rotation: {
+        checkpointCreated: rotation.checkpointCreated === true,
+        sourceGeneration: rotation.sourceGeneration ?? null,
+        targetGeneration: rotation.targetGeneration ?? null,
+        rotationStarted: rotation.rotationStarted === true,
+        rotationSuccess: rotation.rotationSuccess === true,
+        rotationFailureReason: rotation.rotationFailureReason ?? null,
+        checkpointBeforeTokens: rotation.checkpointBeforeTokens ?? null,
+        checkpointAfterTokens: rotation.checkpointAfterTokens ?? null,
+        oldConversationIdHash: rotation.oldConversationIdHash ?? null,
+        newConversationIdHash: rotation.newConversationIdHash ?? null,
+        backendContextReductionPct: rotation.backendContextReductionPct ?? null,
+      },
+    } : {}),
     ...(result === undefined ? {} : {
       result: {
         success: result.success,
