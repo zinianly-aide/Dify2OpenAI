@@ -1,6 +1,7 @@
 import { createGatewayDecisionEvent } from './decision-event.js';
 
 export function createTelemetryRecord(canonicalRequest, decision, result) {
+  const compression = result?.compressionResult;
   return Object.freeze({
     traceId: canonicalRequest.traceId,
     clientType: canonicalRequest.clientType,
@@ -16,6 +17,12 @@ export function createTelemetryRecord(canonicalRequest, decision, result) {
     messageCount: canonicalRequest.messageCount,
     toolCount: canonicalRequest.toolCount,
     toolSchemaEstimatedTokens: canonicalRequest.toolSchemaEstimatedTokens,
+    compressionMode: compression?.mode ?? decision.compression ?? 'none',
+    compressionBeforeTokens: compression?.beforeTokens ?? canonicalRequest.estimatedPromptTokens,
+    compressionAfterTokens: compression?.afterTokens ?? canonicalRequest.estimatedPromptTokens,
+    compressionSavedTokens: compression?.savedTokens ?? 0,
+    compressionPreservedRecentTurns: compression?.preservedRecentTurns ?? null,
+    compressionReasonCodes: Array.isArray(compression?.reasonCodes) ? [...compression.reasonCodes] : [],
     latencyMs: result?.latencyMs ?? 0,
     firstTokenLatencyMs: result?.firstTokenLatencyMs ?? null,
     retryCount: result?.retryCount ?? 0,
