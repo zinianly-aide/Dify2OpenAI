@@ -3,6 +3,7 @@ export * from './conversation-manager.js';
 export * from './tool-schema-registry.js';
 export * from './tool-execution-ledger.js';
 export * from './dify-client.js';
+export * from './attachments.js';
 export * from './gateway-canonical.js';
 export * from './context-profiler.js';
 export * from './decision-engine.js';
