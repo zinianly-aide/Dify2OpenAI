@@ -44,6 +44,17 @@ function oldHistory(count = 10, repeat = 80) {
   return out;
 }
 
+function twoPassHeavyMessages() {
+  const out = [{ role: 'system', content: 'SYSTEM-MUST-STAY' }, { role: 'developer', content: 'DEVELOPER-MUST-STAY' }];
+  for (let i = 0; i < 10; i += 1) {
+    const refs = Array.from({ length: 24 }, (_, j) => `src/feature-${i}/module-${j}/symbol-${i}-${j}.js`).join(' ');
+    out.push({ role: 'user', content: `old request ${i} ${refs}` });
+    out.push({ role: 'assistant', content: `DONE ${refs}` });
+  }
+  out.push({ role: 'user', content: `CURRENT-REQUEST-MUST-STAY ${'protected-current-context '.repeat(1100)}` });
+  return out;
+}
+
 test('single pass reaches target', () => {
   const messages = oldHistory(10, 120);
   const h = harness();
@@ -54,20 +65,32 @@ test('single pass reaches target', () => {
   assert.ok(result.result.reasonCodes.includes('TARGET_REACHED'));
 });
 
-test('multiple passes reach target and dispatch representation is final pass', () => {
-  const messages = oldHistory(35, 35);
+test('multiple heavy passes reach target and dispatch representation is final pass', () => {
+  const messages = twoPassHeavyMessages();
   const h = harness({
-    compression: { heavySummaryMaxChars: 12000, strongerHeavySummaryMaxChars: 300 },
+    compression: { heavySummaryMaxChars: 6000, strongerHeavySummaryMaxChars: 300 },
     quality: { targetUtilization: 0.68, maxCompressionPasses: 2, minimumSavingsRatio: 0 },
   });
   const result = h.guard.run({ messages, initialProfile: profileFor(messages, 0.91), compressor: h.compressor, profiler: h.profiler });
+  assert.equal(result.passes.length, 2);
+  assert.equal(result.passes[0].mode, 'heavy');
+  assert.equal(result.passes[1].mode, 'heavy');
+  assert.ok(result.passes[0].afterUtilization > 0.68);
+  assert.ok(result.passes[1].afterUtilization <= 0.68);
   assert.equal(result.result.targetReached, true);
   assert.equal(result.result.compressionPasses, 2);
-  assert.ok(result.result.afterUtilization <= 0.68);
-  assert.ok(result.messages.some((m) => m.content === 'CURRENT-REQUEST-MUST-STAY'));
+  assert.ok(result.messages.some((m) => String(m.content).startsWith('CURRENT-REQUEST-MUST-STAY')));
   assert.ok(result.messages.some((m) => m.content === 'SYSTEM-MUST-STAY'));
   assert.ok(result.messages.some((m) => m.content === 'DEVELOPER-MUST-STAY'));
   assert.ok(result.result.reasonCodes.includes('TARGET_REACHED'));
+  console.log('QUALITY_GUARD_CASE_A', JSON.stringify({
+    beforeUtilization: result.result.beforeUtilization,
+    pass1: result.passes[0],
+    pass2: result.passes[1],
+    targetUtilization: result.result.targetUtilization,
+    targetReached: result.result.targetReached,
+    compressionPasses: result.result.compressionPasses,
+  }));
 });
 
 test('max passes stops compression without deleting protected context', () => {
