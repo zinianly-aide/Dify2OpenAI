@@ -10,13 +10,14 @@ import {
   ToolExecutionLedger,
   ToolSchemaRegistry,
   backendIdFromUrl,
+  currentImageAttachments,
   isInvalidConversationError,
   resolveConversationState,
+  resolveDifyFiles,
   sha256,
   streamDifyChat,
 } from '@zinianly-aide/dify-core';
 import {
-  assertSupportedMessages,
   deltaHistory,
   findToolCall,
   fullHistory,
@@ -99,7 +100,7 @@ export class DifyAdapter extends LlmAdapter {
       provider,
       id: app.id,
       name: app.name || app.id,
-      inputModalities: ['text'],
+      inputModalities: ['text', 'image'],
     })));
   }
 
@@ -110,7 +111,7 @@ export class DifyAdapter extends LlmAdapter {
       provider,
       id: model,
       name: app.name || model,
-      inputModalities: ['text'],
+      inputModalities: ['text', 'image'],
       ...(app.contextWindow ? { context: { contextWindow: app.contextWindow } } : {}),
     });
   }
@@ -123,7 +124,7 @@ export class DifyAdapter extends LlmAdapter {
     return this.telemetry.snapshot();
   }
 
-  async collect(app, body, signal) {
+  async collect(app, body, signal, attachments = []) {
     if (!app.baseURL) throw new LlmError(`Dify app "${app.id}" has no baseURL`, 'MISSING_CONFIG');
     const apiKey = await this.resolveApiKey(app);
     const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
@@ -133,10 +134,19 @@ export class DifyAdapter extends LlmAdapter {
     let usage;
     let firstTokenAt;
     try {
+      const files = await resolveDifyFiles({
+        baseURL: app.baseURL,
+        apiKey,
+        attachments,
+        user: body.user,
+        signal: requestSignal,
+        headers: attributionHeaders(),
+      });
+      const requestBody = files.length ? { ...body, files } : body;
       for await (const event of streamDifyChat({
         baseURL: app.baseURL,
         apiKey,
-        body,
+        body: requestBody,
         signal: requestSignal,
         headers: attributionHeaders(),
       })) {
@@ -206,7 +216,7 @@ export class DifyAdapter extends LlmAdapter {
     if (!app) throw new LlmError(`Dify app "${appId}" is not configured`, 'UNKNOWN_MODEL');
 
     const messages = options.messages || [];
-    assertSupportedMessages(messages);
+    const currentAttachments = currentImageAttachments(messages, 'dsh');
 
     const canonicalRequest = CanonicalRequest.fromDsh(options, {
       traceId,
@@ -237,6 +247,7 @@ export class DifyAdapter extends LlmAdapter {
           app,
           this.bodyFor(sessionId, '', fullHistory(messages, options.system)),
           options.signal,
+          currentAttachments,
         );
         emitTrace(this.logger, {
           traceId,
@@ -245,6 +256,7 @@ export class DifyAdapter extends LlmAdapter {
           difyAppId: appId,
           conversationState: 'AUXILIARY',
           hasDifyConversationId: false,
+          attachmentCount: currentAttachments.length,
           toolCount: options.tools?.length || 0,
           toolSchemaChanged: false,
           toolCallCount: 0,
@@ -290,6 +302,7 @@ export class DifyAdapter extends LlmAdapter {
           appId,
         })),
         options.signal,
+        strategy === 'TOOL_CONTINUE' ? [] : currentAttachments,
       );
 
       let response;
@@ -307,6 +320,7 @@ export class DifyAdapter extends LlmAdapter {
           difyAppId: appId,
           conversationState: ConversationState.RECOVER,
           hasDifyConversationId: true,
+          attachmentCount: currentAttachments.length,
           toolCount: tools.length,
           toolSchemaChanged: schema.changed,
           toolCallCount: 0,
@@ -347,7 +361,7 @@ export class DifyAdapter extends LlmAdapter {
         replayRounds += 1;
         retryCount += 1;
         const replayQuery = replay.map(({ call, result }) => `tool_result tool_call_id=${call.id}: ${result}`).join('\n');
-        const replayResponse = await this.collect(app, this.bodyFor(sessionId, conversationId, replayQuery), options.signal);
+        const replayResponse = await this.collect(app, this.bodyFor(sessionId, conversationId, replayQuery), options.signal, []);
         answer = replayResponse.answer;
         usage = replayResponse.usage || usage;
         firstTokenAt = firstTokenAt || replayResponse.firstTokenAt;
@@ -373,6 +387,7 @@ export class DifyAdapter extends LlmAdapter {
         difyAppId: appId,
         conversationState: resolved.state,
         hasDifyConversationId: Boolean(conversationId),
+        attachmentCount: resolved.contextStrategy === 'TOOL_CONTINUE' ? 0 : currentAttachments.length,
         toolCount: tools.length,
         toolSchemaChanged: schema.changed,
         toolCallCount: emitted.length,
