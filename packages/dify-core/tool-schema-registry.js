@@ -28,7 +28,7 @@ export class ToolSchemaRegistry {
       toolSchemaHash,
       changed,
       reinjectionRequired: previous === undefined,
-      traceEvent: previous === undefined ? 'tool_schema_injected' : changed ? 'tool_schema_changed' : 'tool_schema_reused',
+      traceEvent: changed ? 'tool_schema_changed' : 'tool_schema_reused',
       canonicalTools,
       normalizedTools,
       backendId,
