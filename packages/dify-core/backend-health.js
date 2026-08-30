@@ -88,6 +88,7 @@ export class BackendHealthStore {
     return Object.freeze({
       backendId: String(backendId),
       state,
+      sampleCount: count,
       recentFailureRate,
       timeoutRate,
       lastFailureAt: record.lastFailureAt,
