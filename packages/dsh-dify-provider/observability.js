@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { sha256 } from '@zinianly-aide/dify-core';
+import { hashSessionValue } from '@zinianly-aide/dify-core';
 
 export function newTraceId() {
   return randomUUID();
 }
 
 export function sessionHash(sessionId) {
-  return sha256(String(sessionId)).slice(0, 16);
+  return hashSessionValue(sessionId);
 }
 
 export function emitTrace(logger, event) {
