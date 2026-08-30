@@ -8,6 +8,8 @@ export * from './gateway-canonical.js';
 export * from './context-profiler.js';
 export * from './compression-policy.js';
 export * from './context-compressor.js';
+export * from './compression-quality-guard.js';
+export * from './backend-context.js';
 export * from './decision-engine.js';
 export * from './decision-event.js';
 export * from './telemetry-collector.js';
