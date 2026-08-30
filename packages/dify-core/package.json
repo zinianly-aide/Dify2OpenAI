@@ -1,7 +1,7 @@
 {
   "name": "@zinianly-aide/dify-core",
   "version": "0.1.0",
-  "description": "Shared Dify conversation lifecycle and tool idempotency core",
+  "description": "Shared Dify conversation lifecycle, decision telemetry and tool idempotency core",
   "type": "module",
   "main": "./index.js",
   "exports": {
@@ -10,7 +10,12 @@
     "./conversation-manager": "./conversation-manager.js",
     "./tool-schema-registry": "./tool-schema-registry.js",
     "./tool-execution-ledger": "./tool-execution-ledger.js",
-    "./dify-client": "./dify-client.js"
+    "./dify-client": "./dify-client.js",
+    "./gateway-canonical": "./gateway-canonical.js",
+    "./context-profiler": "./context-profiler.js",
+    "./decision-engine": "./decision-engine.js",
+    "./decision-event": "./decision-event.js",
+    "./telemetry-collector": "./telemetry-collector.js"
   },
   "engines": {
     "node": ">=20"
