@@ -115,6 +115,7 @@ function importantFragments(text) {
 }
 
 function summaryMessage(messages, maxChars) {
+  if (maxChars <= 0) return { message: null, categories: [] };
   const fragments = [];
   const categories = new Set();
   for (const message of messages) {
@@ -136,9 +137,9 @@ function summaryMessage(messages, maxChars) {
   };
 }
 
-function estimateConversation(messages, tools = [], system) {
+export function estimateConversationTokens(messages, tools = [], system) {
   let total = estimateTokens(system || '') + estimateTokens(tools);
-  for (const message of messages) {
+  for (const message of messages || []) {
     total += estimateTokens(message?.role || '');
     total += estimateTokens(contentText(message?.content));
     total += estimateTokens(message?.tool_calls || []);
@@ -146,21 +147,35 @@ function estimateConversation(messages, tools = [], system) {
   return total;
 }
 
+function utilization(tokens, contextWindow) {
+  const window = Number(contextWindow);
+  return Number.isFinite(window) && window > 0 ? Math.min(1, tokens / window) : undefined;
+}
+
 export class ContextCompressor {
   constructor(options = {}) {
     this.policy = options.policy || new CompressionPolicy(options.config);
   }
 
-  compress({ messages = [], tools = [], system, profile }) {
+  compress({ messages = [], tools = [], system, profile, modeOverride, pass = 1, targetUtilization }) {
     const input = Array.isArray(messages) ? messages : [];
-    const beforeTokens = estimateConversation(input, tools, system);
-    const decision = this.policy.decide(profile);
+    const beforeTokens = estimateConversationTokens(input, tools, system);
+    const policyDecision = this.policy.decide(profile);
+    const decision = modeOverride
+      ? { ...policyDecision, mode: modeOverride, reasonCodes: [...policyDecision.reasonCodes, `compression_mode_override=${modeOverride}`, `compression_pass=${pass}`] }
+      : policyDecision;
     const config = decision.config || this.policy.config;
+    const beforeUtilization = utilization(beforeTokens, profile?.contextWindow);
     if (decision.mode === 'none' || input.length === 0) {
       return {
         messages: input,
         result: new CompressionResult({
           mode: 'none', beforeTokens, afterTokens: beforeTokens, savedTokens: 0,
+          ...(beforeUtilization === undefined ? {} : { beforeUtilization, afterUtilization: beforeUtilization }),
+          ...(targetUtilization === undefined ? {} : { targetUtilization }),
+          compressionPasses: 0,
+          targetReached: targetUtilization === undefined || beforeUtilization === undefined ? false : beforeUtilization <= targetUtilization,
+          unableToReachTarget: false,
           preservedRecentTurns: config.preservedRecentTurns,
           reasonCodes: [...decision.reasonCodes, 'compression_no_changes'],
         }),
@@ -190,9 +205,8 @@ export class ContextCompressor {
     if (removed.some((m) => !isToolMessage(m))) categories.add('older_conversation');
 
     if ((decision.mode === 'light' || decision.mode === 'heavy') && removed.length) {
-      const maxChars = decision.mode === 'heavy'
-        ? config.heavySummaryMaxChars
-        : config.lightSummaryMaxChars;
+      let maxChars = decision.mode === 'heavy' ? config.heavySummaryMaxChars : config.lightSummaryMaxChars;
+      if (decision.mode === 'heavy' && pass > 1) maxChars = Math.min(maxChars, config.strongerHeavySummaryMaxChars);
       const summary = summaryMessage(removed, maxChars);
       summary.categories.forEach((x) => categories.add(x));
       if (summary.message) {
@@ -203,17 +217,22 @@ export class ContextCompressor {
       }
     }
 
-    const afterTokens = estimateConversation(output, tools, system);
+    const afterTokens = estimateConversationTokens(output, tools, system);
+    const afterUtilization = utilization(afterTokens, profile?.contextWindow);
     const savedTokens = Math.max(0, beforeTokens - afterTokens);
     const mode = savedTokens > 0 ? decision.mode : 'none';
+    const protectedCount = preserve.size;
     const reasonCodes = [
       ...decision.reasonCodes,
       `compression_removed_messages=${removed.length}`,
+      `compression_protected_messages=${protectedCount}`,
       `compression_preserved_recent_turns=${config.preservedRecentTurns}`,
       ...[...categories].sort().map((category) => `compression_category=${category}`),
       ...(toolChains.size ? ['compression_preserved_tool_chain'] : []),
       ...(latestHumanUser !== undefined ? ['compression_preserved_current_user_request'] : []),
       ...(decision.forced ? ['compression_forced=true'] : []),
+      ...(removed.length === 0 ? ['compression_not_enough_compressible_history'] : []),
+      ...(removed.length === 0 && protectedCount === input.length ? ['compression_protected_context_dominates'] : []),
     ];
     return {
       messages: output,
@@ -222,6 +241,12 @@ export class ContextCompressor {
         beforeTokens,
         afterTokens,
         savedTokens,
+        ...(beforeUtilization === undefined ? {} : { beforeUtilization }),
+        ...(afterUtilization === undefined ? {} : { afterUtilization }),
+        ...(targetUtilization === undefined ? {} : { targetUtilization }),
+        compressionPasses: mode === 'none' ? 0 : 1,
+        targetReached: targetUtilization === undefined || afterUtilization === undefined ? false : afterUtilization <= targetUtilization,
+        unableToReachTarget: false,
         preservedRecentTurns: config.preservedRecentTurns,
         reasonCodes,
       }),
