@@ -9,3 +9,4 @@
             name: !!js process.env.DIFY_MODEL_NAME || 'Dify'
             baseURL: !!js process.env.DIFY_API_URL
             apiKeyEnv: !!js process.env.DIFY_API_KEY_ENV || 'DIFY_API_KEY'
+            contextWindow: !!js Number(process.env.DIFY_CONTEXT_WINDOW || 32768)
