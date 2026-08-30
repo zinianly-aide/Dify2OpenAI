@@ -7,6 +7,7 @@ export function createTelemetryRecord(canonicalRequest, decision, result) {
   const rotation = result?.rotation || {};
   const routing = result?.routing || {};
   const migration = result?.migration || {};
+  const toolOptimization = result?.toolOptimization || {};
   const backendHealth = result?.backendHealth || routing.backendHealth;
   return Object.freeze({
     traceId: canonicalRequest.traceId,
@@ -66,6 +67,17 @@ export function createTelemetryRecord(canonicalRequest, decision, result) {
     migrationFailureReason: migration.failureReason ?? null,
     sourceBackend: migration.sourceBackendId ?? routing.previousBackend ?? null,
     targetBackend: migration.targetBackendId ?? routing.selectedBackend ?? routing.backendId ?? null,
+    toolCountBefore: toolOptimization.beforeToolCount ?? canonicalRequest.toolCount ?? 0,
+    toolCountAfter: toolOptimization.afterToolCount ?? canonicalRequest.toolCount ?? 0,
+    toolSchemaTokensBefore: toolOptimization.beforeSchemaTokens ?? canonicalRequest.toolSchemaEstimatedTokens ?? 0,
+    toolSchemaTokensAfter: toolOptimization.afterSchemaTokens ?? canonicalRequest.toolSchemaEstimatedTokens ?? 0,
+    toolSchemaTokensSaved: toolOptimization.savedTokens ?? 0,
+    toolPruningMode: toolOptimization.mode ?? 'SEND_ALL',
+    toolPruningConfidence: toolOptimization.confidence ?? null,
+    toolPruningReasonCodes: Array.isArray(toolOptimization.reasonCodes) ? [...toolOptimization.reasonCodes] : [],
+    toolRecoveryTriggered: toolOptimization.recoveryTriggered === true,
+    toolRecoveryReason: toolOptimization.recoveryReason ?? null,
+    toolRecoverySuccess: toolOptimization.recoverySuccess === true,
     compression_passes: compression?.compressionPasses ?? 0,
     compression_target_reached: compression?.targetReached ?? false,
     compression_unable_to_reach_target: compression?.unableToReachTarget ?? false,
@@ -99,6 +111,17 @@ export function createTelemetryRecord(canonicalRequest, decision, result) {
     migration_failure_reason: migration.failureReason ?? null,
     source_backend: migration.sourceBackendId ?? routing.previousBackend ?? null,
     target_backend: migration.targetBackendId ?? routing.selectedBackend ?? routing.backendId ?? null,
+    tool_count_before: toolOptimization.beforeToolCount ?? canonicalRequest.toolCount ?? 0,
+    tool_count_after: toolOptimization.afterToolCount ?? canonicalRequest.toolCount ?? 0,
+    tool_schema_tokens_before: toolOptimization.beforeSchemaTokens ?? canonicalRequest.toolSchemaEstimatedTokens ?? 0,
+    tool_schema_tokens_after: toolOptimization.afterSchemaTokens ?? canonicalRequest.toolSchemaEstimatedTokens ?? 0,
+    tool_schema_tokens_saved: toolOptimization.savedTokens ?? 0,
+    tool_pruning_mode: toolOptimization.mode ?? 'SEND_ALL',
+    tool_pruning_confidence: toolOptimization.confidence ?? null,
+    tool_pruning_reason_codes: Array.isArray(toolOptimization.reasonCodes) ? [...toolOptimization.reasonCodes] : [],
+    tool_recovery_triggered: toolOptimization.recoveryTriggered === true,
+    tool_recovery_reason: toolOptimization.recoveryReason ?? null,
+    tool_recovery_success: toolOptimization.recoverySuccess === true,
     latencyMs: result?.latencyMs ?? 0,
     firstTokenLatencyMs: result?.firstTokenLatencyMs ?? null,
     retryCount: result?.retryCount ?? 0,
