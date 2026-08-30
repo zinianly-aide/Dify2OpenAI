@@ -41,11 +41,24 @@ function contains(result, code) {
   return result?.reasonCodes?.includes(code);
 }
 
-function finalize(base, fields, reason) {
+function finalize(base, fields, reasons) {
+  const additions = Array.isArray(reasons) ? reasons : [reasons];
   return new CompressionResult({
     ...base,
     ...fields,
-    reasonCodes: [...base.reasonCodes, reason],
+    reasonCodes: [...base.reasonCodes, ...additions.filter(Boolean)],
+  });
+}
+
+function passSummary(pass, mode, result, profile) {
+  return Object.freeze({
+    pass,
+    mode,
+    beforeTokens: result.beforeTokens,
+    afterTokens: result.afterTokens,
+    savedTokens: result.savedTokens,
+    ...(result.beforeUtilization === undefined ? {} : { beforeUtilization: result.beforeUtilization }),
+    ...(profile?.contextUtilization === undefined ? {} : { afterUtilization: profile.contextUtilization }),
   });
 }
 
@@ -58,11 +71,13 @@ export class CompressionQualityGuard {
   run({ messages = [], tools = [], system, initialProfile, compressor, profiler }) {
     const target = this.config.targetUtilization;
     const initialUtilization = initialProfile?.contextUtilization;
+    const passSummaries = [];
     if (initialUtilization !== undefined && initialUtilization <= target) {
       const first = compressor.compress({ messages, tools, system, profile: initialProfile, targetUtilization: target });
       return {
         messages: first.messages,
         profile: initialProfile,
+        passes: passSummaries,
         result: new CompressionResult({
           ...first.result,
           targetUtilization: target,
@@ -94,7 +109,12 @@ export class CompressionQualityGuard {
           compressionPasses: passes,
           reasonCodes: [...aggregateReasonCodes, ...noChange.result.reasonCodes],
         });
-        return { messages: currentMessages, profile: currentProfile, result: finalize(base, { targetReached: false, unableToReachTarget: true, targetUtilization: target }, 'NOT_ENOUGH_COMPRESSIBLE_HISTORY') };
+        return {
+          messages: currentMessages,
+          profile: currentProfile,
+          passes: passSummaries,
+          result: finalize(base, { targetReached: false, unableToReachTarget: true, targetUtilization: target }, 'NOT_ENOUGH_COMPRESSIBLE_HISTORY'),
+        };
       }
 
       passes += 1;
@@ -117,6 +137,7 @@ export class CompressionQualityGuard {
       });
       const afterUtilization = currentProfile.contextUtilization;
       const savingsRatio = step.result.beforeTokens > 0 ? step.result.savedTokens / step.result.beforeTokens : 0;
+      passSummaries.push(passSummary(passes, mode, step.result, currentProfile));
 
       const aggregate = new CompressionResult({
         ...step.result,
@@ -133,16 +154,32 @@ export class CompressionQualityGuard {
       });
 
       if (aggregate.targetReached) {
-        return { messages: currentMessages, profile: currentProfile, result: finalize(aggregate, {}, 'TARGET_REACHED') };
+        return { messages: currentMessages, profile: currentProfile, passes: passSummaries, result: finalize(aggregate, {}, 'TARGET_REACHED') };
       }
-      if (contains(step.result, 'compression_protected_context_dominates')) {
-        return { messages: currentMessages, profile: currentProfile, result: finalize(aggregate, { unableToReachTarget: true }, 'PROTECTED_CONTEXT_DOMINATES') };
+
+      const protectedDominates = contains(step.result, 'compression_protected_context_dominates');
+      const noCompressibleHistory = contains(step.result, 'compression_not_enough_compressible_history');
+      if (passes >= this.config.maxCompressionPasses) {
+        const evidence = [
+          ...(protectedDominates ? ['PROTECTED_CONTEXT_DOMINATES'] : []),
+          ...(noCompressibleHistory ? ['NOT_ENOUGH_COMPRESSIBLE_HISTORY'] : []),
+          'MAX_PASSES_REACHED',
+        ];
+        return {
+          messages: currentMessages,
+          profile: currentProfile,
+          passes: passSummaries,
+          result: finalize(aggregate, { unableToReachTarget: true }, evidence),
+        };
       }
-      if (contains(step.result, 'compression_not_enough_compressible_history')) {
-        return { messages: currentMessages, profile: currentProfile, result: finalize(aggregate, { unableToReachTarget: true }, 'NOT_ENOUGH_COMPRESSIBLE_HISTORY') };
+      if (protectedDominates) {
+        return { messages: currentMessages, profile: currentProfile, passes: passSummaries, result: finalize(aggregate, { unableToReachTarget: true }, 'PROTECTED_CONTEXT_DOMINATES') };
+      }
+      if (noCompressibleHistory) {
+        return { messages: currentMessages, profile: currentProfile, passes: passSummaries, result: finalize(aggregate, { unableToReachTarget: true }, 'NOT_ENOUGH_COMPRESSIBLE_HISTORY') };
       }
       if (savingsRatio < this.config.minimumSavingsRatio) {
-        return { messages: currentMessages, profile: currentProfile, result: finalize(aggregate, { unableToReachTarget: true }, 'NO_MEANINGFUL_SAVINGS') };
+        return { messages: currentMessages, profile: currentProfile, passes: passSummaries, result: finalize(aggregate, { unableToReachTarget: true }, 'NO_MEANINGFUL_SAVINGS') };
       }
     }
 
@@ -159,6 +196,6 @@ export class CompressionQualityGuard {
       unableToReachTarget: true,
       reasonCodes: [...aggregateReasonCodes, 'MAX_PASSES_REACHED'],
     });
-    return { messages: currentMessages, profile: currentProfile, result };
+    return { messages: currentMessages, profile: currentProfile, passes: passSummaries, result };
   }
 }
