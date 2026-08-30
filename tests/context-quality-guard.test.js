@@ -72,6 +72,14 @@ test('multiple heavy passes reach target and dispatch representation is final pa
     quality: { targetUtilization: 0.68, maxCompressionPasses: 2, minimumSavingsRatio: 0 },
   });
   const result = h.guard.run({ messages, initialProfile: profileFor(messages, 0.91), compressor: h.compressor, profiler: h.profiler });
+  console.log('QUALITY_GUARD_CASE_A_DEBUG', JSON.stringify({
+    beforeUtilization: result.result.beforeUtilization,
+    passes: result.passes,
+    afterUtilization: result.result.afterUtilization,
+    targetUtilization: result.result.targetUtilization,
+    targetReached: result.result.targetReached,
+    compressionPasses: result.result.compressionPasses,
+  }));
   assert.equal(result.passes.length, 2);
   assert.equal(result.passes[0].mode, 'heavy');
   assert.equal(result.passes[1].mode, 'heavy');
@@ -83,14 +91,6 @@ test('multiple heavy passes reach target and dispatch representation is final pa
   assert.ok(result.messages.some((m) => m.content === 'SYSTEM-MUST-STAY'));
   assert.ok(result.messages.some((m) => m.content === 'DEVELOPER-MUST-STAY'));
   assert.ok(result.result.reasonCodes.includes('TARGET_REACHED'));
-  console.log('QUALITY_GUARD_CASE_A', JSON.stringify({
-    beforeUtilization: result.result.beforeUtilization,
-    pass1: result.passes[0],
-    pass2: result.passes[1],
-    targetUtilization: result.result.targetUtilization,
-    targetReached: result.result.targetReached,
-    compressionPasses: result.result.compressionPasses,
-  }));
 });
 
 test('max passes stops compression without deleting protected context', () => {
