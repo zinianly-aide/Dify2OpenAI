@@ -1,20 +1,28 @@
 function blockText(block) {
+  if (typeof block === 'string') return block;
   if (block?.type === 'text') return block.text || '';
   if (block?.type === 'reasoning') return block.text || '';
-  if (block?.type === 'tool-result') return (block.content || []).map(blockText).filter(Boolean).join('\n');
+  if (block?.type === 'tool-result') {
+    const content = Array.isArray(block.content) ? block.content : [block.content].filter(Boolean);
+    return content.map(blockText).filter(Boolean).join('\n');
+  }
   return '';
 }
 
 export function messageText(message) {
-  return (message?.content || []).map(blockText).filter(Boolean).join('\n');
+  if (typeof message?.content === 'string') return message.content;
+  const content = Array.isArray(message?.content) ? message.content : [];
+  return content.map(blockText).filter(Boolean).join('\n');
 }
 
 export function toolCallsOf(message) {
-  return (message?.content || []).filter((block) => block?.type === 'tool-call');
+  const content = Array.isArray(message?.content) ? message.content : [];
+  return content.filter((block) => block?.type === 'tool-call');
 }
 
 export function toolResultsOf(message) {
-  return (message?.content || []).filter((block) => block?.type === 'tool-result');
+  const content = Array.isArray(message?.content) ? message.content : [];
+  return content.filter((block) => block?.type === 'tool-result');
 }
 
 export function serializeMessage(message) {
@@ -103,7 +111,8 @@ export function parseToolCalls(answer = '') {
 
 export function assertSupportedMessages(messages) {
   for (const message of messages) {
-    if ((message?.content || []).some((block) => block?.type === 'image')) {
+    const content = Array.isArray(message?.content) ? message.content : [];
+    if (content.some((block) => block?.type === 'image')) {
       const error = new Error('dsh-dify-provider does not yet support DSH image blocks');
       error.code = 'UNSUPPORTED_CONTENT';
       throw error;
