@@ -2,6 +2,14 @@ import { BackendContextMode } from './backend-registry.js';
 import { BackendHealthState } from './backend-health.js';
 import { isFallbackEligible } from './backend-router.js';
 import { assertNoCrossBackendConversationReuse } from './context-migration.js';
+import { ToolSchemaRegistry } from './tool-schema-registry.js';
+import {
+  ToolPruner,
+  ToolRecovery,
+  ToolRelevancePolicy,
+  ToolSchemaCostEstimator,
+  ToolUsageProfiler,
+} from './tool-optimization.js';
 
 export class BackendAffinityStore {
   constructor() { this.map = new Map(); }
@@ -41,7 +49,11 @@ function toolReplayMessages(ledger, requests = [], existingMessages = []) {
 }
 
 export class AdaptiveBackendGateway {
-  constructor({ registry, router, migrationPlanner, conversationStore, checkpointManager, healthStore, toolLedger, executor, affinityStore, credentialsResolver } = {}) {
+  constructor({
+    registry, router, migrationPlanner, conversationStore, checkpointManager, healthStore, toolLedger, executor,
+    affinityStore, credentialsResolver, toolUsageProfiler, toolSchemaCostEstimator, toolRelevancePolicy,
+    toolPruner, toolRecovery, toolSchemaRegistry,
+  } = {}) {
     if (!registry || !router || !migrationPlanner || !conversationStore || !executor) throw new Error('ADAPTIVE_BACKEND_GATEWAY_DEPENDENCIES_REQUIRED');
     this.registry = registry;
     this.router = router;
@@ -53,6 +65,12 @@ export class AdaptiveBackendGateway {
     this.executor = executor;
     this.affinityStore = affinityStore || new BackendAffinityStore();
     this.credentialsResolver = credentialsResolver || (() => ({}));
+    this.toolUsageProfiler = toolUsageProfiler || new ToolUsageProfiler();
+    this.toolSchemaCostEstimator = toolSchemaCostEstimator || new ToolSchemaCostEstimator();
+    this.toolRelevancePolicy = toolRelevancePolicy || new ToolRelevancePolicy();
+    this.toolPruner = toolPruner || new ToolPruner({ estimator: this.toolSchemaCostEstimator });
+    this.toolRecovery = toolRecovery || new ToolRecovery({ maxRecoveries: 1 });
+    this.toolSchemaRegistry = toolSchemaRegistry || new ToolSchemaRegistry();
   }
 
   async execute(input = {}) {
@@ -64,6 +82,7 @@ export class AdaptiveBackendGateway {
     const canonicalMessages = Array.isArray(input.canonicalMessages) && input.canonicalMessages.length
       ? input.canonicalMessages
       : requestMessages;
+    const availableTools = Array.isArray(input.tools) ? input.tools : [];
     const currentBackendId = input.currentBackendId || this.affinityStore.get(sessionId, providerId, appId) || null;
     const routing = this.router.decide({ ...input, currentBackendId });
     if (!routing.backendId) {
@@ -101,7 +120,7 @@ export class AdaptiveBackendGateway {
               messages: canonicalMessages,
               compressedMessages: requestMessages,
               system: input.system,
-              tools: input.tools || [],
+              tools: availableTools,
               reasonCodes: routing.reasonCodes,
             });
             if (created.created) checkpoint = created.checkpoint;
@@ -129,9 +148,7 @@ export class AdaptiveBackendGateway {
       const targetRemote = this.conversationStore.get(sessionId, providerId, appId, backendId);
       let targetGeneration = null;
       let conversationId = '';
-      let messages = backend.capabilities.contextMode === BackendContextMode.STATELESS
-        ? canonicalMessages
-        : requestMessages;
+      let messages = backend.capabilities.contextMode === BackendContextMode.STATELESS ? canonicalMessages : requestMessages;
 
       if (backend.capabilities.contextMode === BackendContextMode.STATEFUL) {
         if (!migrationRequired && targetRemote?.conversationId) {
@@ -156,18 +173,92 @@ export class AdaptiveBackendGateway {
       const replayMessages = toolReplayMessages(this.toolLedger, input.completedToolInputs || [], messages);
       if (replayMessages.length) messages = [...messages, ...replayMessages];
 
+      const generation = targetGeneration?.generation ?? targetRemote?.generation ?? (backend.capabilities.contextMode === BackendContextMode.STATEFUL ? 1 : 'stateless');
+      const scope = { sessionId, clientType: String(input.clientType || ''), backendId };
+      const fullCost = this.toolSchemaCostEstimator.summarize(availableTools);
+      const priorProfile = this.toolUsageProfiler.recordRequest(scope, {
+        tools: availableTools,
+        schemaTokens: fullCost.beforeSchemaTokens,
+        pendingTools: input.pendingTools || [],
+      });
+      for (const completed of input.completedToolInputs || []) {
+        if (completed.toolName) this.toolUsageProfiler.recordOutcome(scope, { toolName: completed.toolName, success: true });
+      }
+      const policyResult = this.toolRelevancePolicy.classify({
+        canonicalRequest: { clientType: input.clientType, taskType: input.taskType },
+        tools: availableTools,
+        profile: priorProfile,
+        backendCapabilities: backend.capabilities,
+        taskHints: input.taskHints || [],
+        explicitRequiredTools: input.requiredTools || [],
+        messages: canonicalMessages,
+      });
+      const pruning = this.toolPruner.prune({
+        canonicalRequest: { clientType: input.clientType, taskType: input.taskType },
+        availableTools,
+        profile: priorProfile,
+        policyResult,
+      });
+      const schemaState = this.toolSchemaRegistry.resolve({
+        dshConversationId: sessionId,
+        providerId,
+        difyAppId: appId,
+        backendId,
+        generation,
+        tools: pruning.selectedTools,
+      });
+      const toolOptimization = {
+        ...pruning,
+        selectedTools: undefined,
+        schemaReinjectionRequired: schemaState.reinjectionRequired,
+        schemaHash: schemaState.toolSchemaHash,
+        recoveryTriggered: false,
+        recoveryReason: null,
+        recoverySuccess: false,
+      };
+
       attempted.push(backendId);
       try {
-        const result = await this.executor.execute({
-          backend,
-          credentials: await this.credentialsResolver(backend),
-          messages,
-          tools: input.tools || [],
-          user: input.user || sessionId,
-          conversationId,
-          stream: input.stream,
-          signal: input.signal,
-        });
+        const credentials = await this.credentialsResolver(backend);
+        let result;
+        let recoveryCount = 0;
+        try {
+          result = await this.executor.execute({
+            backend,
+            credentials,
+            messages,
+            tools: pruning.selectedTools,
+            user: input.user || sessionId,
+            conversationId,
+            stream: input.stream,
+            signal: input.signal,
+          });
+        } catch (firstError) {
+          if (!this.toolRecovery.shouldRecover({ error: firstError, pruningResult: pruning, recoveryCount })) throw firstError;
+          recoveryCount += 1;
+          const recovery = this.toolRecovery.decision(firstError);
+          toolOptimization.recoveryTriggered = true;
+          toolOptimization.recoveryReason = recovery.reason;
+          this.toolSchemaRegistry.resolve({
+            dshConversationId: sessionId,
+            providerId,
+            difyAppId: appId,
+            backendId,
+            generation,
+            tools: availableTools,
+          });
+          result = await this.executor.execute({
+            backend,
+            credentials,
+            messages,
+            tools: availableTools,
+            user: input.user || sessionId,
+            conversationId,
+            stream: input.stream,
+            signal: input.signal,
+          });
+          toolOptimization.recoverySuccess = true;
+        }
         this.healthStore?.recordSuccess?.(backendId);
 
         if (backend.capabilities.contextMode === BackendContextMode.STATEFUL) {
@@ -201,6 +292,7 @@ export class AdaptiveBackendGateway {
         this.affinityStore.set(sessionId, providerId, appId, backendId);
         return Object.freeze({
           ...result,
+          toolOptimization: Object.freeze(toolOptimization),
           routing: Object.freeze({
             selectedBackend: backendId,
             previousBackend: currentBackendId,
