@@ -116,16 +116,19 @@ function pendingToolNames(messages = []) {
 }
 
 export class ToolRelevancePolicy {
-  constructor({ requiredCoreTools = [], criticalTools = [], clientRequiredTools = {}, categoryHints = {} } = {}) {
+  constructor({ requiredCoreTools = [], criticalTools = [], clientRequiredTools = {}, categoryHints = {}, pruningConfidenceThreshold = 0.65 } = {}) {
     this.requiredCoreTools = new Set(requiredCoreTools.map(String));
     this.criticalTools = new Set(criticalTools.map(String));
     this.clientRequiredTools = clientRequiredTools;
     this.categoryHints = categoryHints;
+    const threshold = Number(pruningConfidenceThreshold);
+    if (!(Number.isFinite(threshold) && threshold >= 0.1 && threshold <= 1)) throw new Error('TOOL_PRUNING_CONFIDENCE_THRESHOLD_INVALID');
+    this.pruningConfidenceThreshold = threshold;
   }
 
   classify({ canonicalRequest = {}, tools = [], profile = {}, backendCapabilities = {}, taskHints = [], explicitRequiredTools = [], messages = [] } = {}) {
     if (backendCapabilities.supportsTools === false) {
-      return Object.freeze({ confidence: 'high', classifications: tools.map((tool) => ({ toolName: toolNameOf(tool), relevance: ToolRelevance.DISABLED, reasonCodes: ['BACKEND_TOOLS_UNSUPPORTED'] })) });
+      return Object.freeze({ confidence: 'high', confidenceScore: 1, pruningConfidenceThreshold: this.pruningConfidenceThreshold, classifications: tools.map((tool) => ({ toolName: toolNameOf(tool), relevance: ToolRelevance.DISABLED, reasonCodes: ['BACKEND_TOOLS_UNSUPPORTED'] })) });
     }
     const pending = new Set([...(profile.pendingTools || []), ...pendingToolNames(messages)].map(String));
     const recent = new Set((profile.recentlyUsedTools || []).map(String));
@@ -151,8 +154,15 @@ export class ToolRelevancePolicy {
       }
       return Object.freeze({ toolName: name, relevance, reasonCodes: Object.freeze(reasons) });
     });
-    const hasSignal = classifications.some((item) => item.relevance === ToolRelevance.REQUIRED || item.relevance === ToolRelevance.LIKELY);
-    return Object.freeze({ confidence: hasSignal ? 'high' : 'low', classifications: Object.freeze(classifications) });
+    const requiredSignal = classifications.some((item) => item.relevance === ToolRelevance.REQUIRED);
+    const likelySignal = classifications.some((item) => item.relevance === ToolRelevance.LIKELY);
+    const confidenceScore = requiredSignal ? 1 : likelySignal ? 0.75 : 0;
+    return Object.freeze({
+      confidence: confidenceScore >= this.pruningConfidenceThreshold ? 'high' : 'low',
+      confidenceScore,
+      pruningConfidenceThreshold: this.pruningConfidenceThreshold,
+      classifications: Object.freeze(classifications),
+    });
   }
 }
 
@@ -170,7 +180,7 @@ export class ToolPruner {
         selectedTools: Object.freeze([...availableTools]), removedTools: Object.freeze([]),
         beforeToolCount: before.beforeToolCount, afterToolCount: before.beforeToolCount,
         beforeSchemaTokens: before.beforeSchemaTokens, afterSchemaTokens: before.beforeSchemaTokens,
-        savedTokens: 0, confidence: policyResult?.confidence || 'low', mode: ToolPruningMode.SEND_ALL,
+        savedTokens: 0, confidence: policyResult?.confidence || 'low', confidenceScore: policyResult?.confidenceScore ?? 0, mode: ToolPruningMode.SEND_ALL,
         reasonCodes: Object.freeze(['LOW_CONFIDENCE_SEND_ALL']),
       });
     }
@@ -183,7 +193,7 @@ export class ToolPruner {
         selectedTools: Object.freeze([...availableTools]), removedTools: Object.freeze([]),
         beforeToolCount: before.beforeToolCount, afterToolCount: before.beforeToolCount,
         beforeSchemaTokens: before.beforeSchemaTokens, afterSchemaTokens: before.beforeSchemaTokens,
-        savedTokens: 0, confidence: 'low', mode: ToolPruningMode.SEND_ALL,
+        savedTokens: 0, confidence: 'low', confidenceScore: policyResult?.confidenceScore ?? 0, mode: ToolPruningMode.SEND_ALL,
         reasonCodes: Object.freeze(['INSUFFICIENT_RELEVANCE_SIGNAL_SEND_ALL']),
       });
     }
@@ -195,7 +205,7 @@ export class ToolPruner {
       beforeToolCount: before.beforeToolCount, afterToolCount: selected.length,
       beforeSchemaTokens: before.beforeSchemaTokens, afterSchemaTokens: after.beforeSchemaTokens,
       savedTokens: Math.max(0, before.beforeSchemaTokens - after.beforeSchemaTokens),
-      confidence: policyResult.confidence, mode: removed.length ? ToolPruningMode.PRUNED : ToolPruningMode.SEND_ALL,
+      confidence: policyResult.confidence, confidenceScore: policyResult?.confidenceScore ?? 0, mode: removed.length ? ToolPruningMode.PRUNED : ToolPruningMode.SEND_ALL,
       reasonCodes: Object.freeze(removed.length ? ['DETERMINISTIC_RELEVANCE_PRUNE'] : ['NO_SAFE_PRUNING_OPPORTUNITY']),
     });
   }
