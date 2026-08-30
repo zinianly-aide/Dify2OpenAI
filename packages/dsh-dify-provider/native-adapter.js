@@ -2,6 +2,7 @@ import { LlmAdapter, LlmError, attributionHeaders } from '@deepseek-ai/dsh-llm';
 import {
   CanonicalRequest,
   CanonicalResponse,
+  CheckpointManager,
   CheckpointRecommendation,
   CompressionPolicy,
   CompressionQualityGuard,
@@ -11,9 +12,11 @@ import {
   DecisionEngine,
   DifyUsageExtractor,
   MemoryConversationStore,
+  RotationRecommendationStore,
   TelemetryCollector,
   ToolExecutionLedger,
   ToolSchemaRegistry,
+  backendContextReductionPct,
   backendIdFromUrl,
   checkpointRecommendationConfigFromEnv,
   compressionConfigFromEnv,
@@ -61,11 +64,15 @@ function errorType(error) {
   return String(error?.code || error?.name || 'unknown_error').slice(0, 120);
 }
 
+function conversationHash(value) {
+  return value ? sha256(`conversation:${String(value)}`).slice(0, 24) : undefined;
+}
+
 function ledgerInput(sessionId, providerId, appId, call) {
   return {
     providerId,
     appId,
-    conversationId: sessionId,
+    sessionId,
     toolCallId: String(call.id),
     arguments: call.arguments || '{}',
   };
@@ -91,6 +98,8 @@ export class DifyAdapter extends LlmAdapter {
     this.readDshAttachment = readDshAttachment;
     this.logger = logger;
     this.conversations = new MemoryConversationStore();
+    this.checkpointManager = new CheckpointManager();
+    this.rotationRecommendations = new RotationRecommendationStore();
     this.toolSchemas = new ToolSchemaRegistry();
     this.toolLedger = new ToolExecutionLedger();
     this.contextProfiler = new ContextProfiler();
@@ -144,7 +153,10 @@ export class DifyAdapter extends LlmAdapter {
   }
 
   resetSession(sessionId, appId) {
-    this.conversations.resetProvider(String(sessionId), this.providerId, appId);
+    const app = this.apps.get(appId);
+    const backendId = backendIdFromUrl(app?.baseURL);
+    this.conversations.resetProvider(String(sessionId), this.providerId, appId, backendId);
+    this.rotationRecommendations.clear(String(sessionId), backendId, this.providerId, appId);
   }
 
   telemetrySnapshot() {
@@ -201,11 +213,11 @@ export class DifyAdapter extends LlmAdapter {
     return { answer, conversationId, usage, firstTokenAt };
   }
 
-  queryFor({ messages, system, tools, schema, strategy, providerId, appId }) {
-    const history = strategy === 'FULL_BOOTSTRAP' || strategy === 'RECOVERY_BOOTSTRAP'
+  queryFor({ messages, system, tools, schema, strategy, providerId, appId, forceSchema = false }) {
+    const history = strategy === 'FULL_BOOTSTRAP' || strategy === 'RECOVERY_BOOTSTRAP' || strategy === 'CHECKPOINT_BOOTSTRAP'
       ? fullHistory(messages, system)
       : deltaHistory(messages, providerId, appId);
-    return [schemaInstruction(tools, schema.changed), history].filter(Boolean).join('\n\n');
+    return [schemaInstruction(tools, schema.changed || forceSchema), history].filter(Boolean).join('\n\n');
   }
 
   bodyFor(sessionId, conversationId, query) {
@@ -254,9 +266,10 @@ export class DifyAdapter extends LlmAdapter {
       contextWindow: app.contextWindow,
       policyVersion: this.decisionEngine.policyVersion,
     });
+    const backendId = canonicalRequest.backendId;
     const contextProfile = this.contextProfiler.profile(canonicalRequest);
     const decision = this.decisionEngine.decide(canonicalRequest, contextProfile, {
-      backendId: canonicalRequest.backendId,
+      backendId,
       model: appId,
     });
     const compression = this.compressionQualityGuard.run({
@@ -268,6 +281,7 @@ export class DifyAdapter extends LlmAdapter {
       profiler: this.contextProfiler,
     });
     const messages = compression.messages;
+    let rotationTelemetry;
     let telemetryRecorded = false;
     const recordDecision = (fields) => {
       if (telemetryRecorded) return;
@@ -288,6 +302,7 @@ export class DifyAdapter extends LlmAdapter {
         compressionResult: compression.result,
         backendReconciliation,
         checkpointRecommendation: checkpoint,
+        rotation: rotationTelemetry,
         ...fields,
       }));
     };
@@ -305,6 +320,7 @@ export class DifyAdapter extends LlmAdapter {
           dshSessionIdHash: sessionHash(sessionId),
           providerId,
           difyAppId: appId,
+          backendId,
           conversationState: 'AUXILIARY',
           hasDifyConversationId: false,
           attachmentCount: currentAttachments.length,
@@ -344,10 +360,178 @@ export class DifyAdapter extends LlmAdapter {
       const toolResults = tailToolResults(originalMessages);
       const schema = this.toolSchemas.resolve({ dshConversationId: sessionId, providerId, difyAppId: appId, tools });
       const resultInputs = this.recordToolResults(sessionId, providerId, appId, originalMessages);
-      let remote = this.conversations.get(sessionId, providerId, appId);
+      let remote = this.conversations.get(sessionId, providerId, appId, backendId);
       let resolved = resolveConversationState({ remoteState: remote, messages: originalMessages, toolResults });
-
       let retryCount = 0;
+      let response;
+      let rotationSucceeded = false;
+
+      const pendingRecommendation = this.rotationRecommendations.get(sessionId, backendId, providerId, appId);
+      const immediateRecommendation = this.checkpointRecommendation.recommend({
+        compressionResult: compression.result,
+        reconciliation: undefined,
+      });
+      const rotationReasons = [...new Set([
+        ...(pendingRecommendation?.reasonCodes || []),
+        ...(immediateRecommendation.recommended ? immediateRecommendation.reasonCodes : []),
+      ])];
+
+      if (remote && rotationReasons.length) {
+        const checkpointResult = this.checkpointManager.create({
+          sessionId,
+          backendId,
+          providerId,
+          appId,
+          sourceGeneration: remote.generation,
+          contextVersion: (remote.contextVersion || remote.generation || 1) + 1,
+          messages: originalMessages,
+          compressedMessages: messages,
+          system: options.system,
+          tools,
+          compressionResult: compression.result,
+          reasonCodes: rotationReasons,
+        });
+
+        if (checkpointResult.deferred) {
+          rotationTelemetry = {
+            checkpointCreated: false,
+            sourceGeneration: remote.generation,
+            targetGeneration: null,
+            rotationStarted: false,
+            rotationSuccess: false,
+            rotationFailureReason: 'ROTATION_DEFERRED_PENDING_TOOL',
+            checkpointBeforeTokens: compression.result.beforeTokens,
+            checkpointAfterTokens: compression.result.afterTokens,
+            oldConversationIdHash: conversationHash(remote.conversationId),
+          };
+          emitTrace(this.logger, {
+            traceId,
+            dshSessionIdHash: sessionHash(sessionId),
+            providerId,
+            difyAppId: appId,
+            backendId,
+            conversationState: ConversationState.CHECKPOINT,
+            sourceGeneration: remote.generation,
+            rotationStarted: false,
+            rotationDeferred: true,
+            reasonCode: 'ROTATION_DEFERRED_PENDING_TOOL',
+          });
+        } else if (checkpointResult.created) {
+          const checkpoint = checkpointResult.checkpoint;
+          const target = this.conversations.createNextGeneration({
+            dshConversationId: sessionId,
+            providerId,
+            difyAppId: appId,
+            backendId,
+            checkpointId: checkpoint.checkpointId,
+            contextVersion: checkpoint.contextVersion,
+          });
+          resolved = resolveConversationState({ remoteState: remote, messages: originalMessages, toolResults, rotating: true });
+          rotationTelemetry = {
+            checkpointCreated: true,
+            sourceGeneration: remote.generation,
+            targetGeneration: target.generation,
+            rotationStarted: true,
+            rotationSuccess: false,
+            checkpointBeforeTokens: checkpoint.estimatedTokensBefore,
+            checkpointAfterTokens: checkpoint.estimatedTokensAfter,
+            oldConversationIdHash: conversationHash(remote.conversationId),
+          };
+          emitTrace(this.logger, {
+            traceId,
+            dshSessionIdHash: sessionHash(sessionId),
+            providerId,
+            difyAppId: appId,
+            backendId,
+            conversationState: ConversationState.ROTATE_BOOTSTRAP,
+            sourceGeneration: remote.generation,
+            targetGeneration: target.generation,
+            checkpointCreated: true,
+            rotationStarted: true,
+            contextStrategy: resolved.contextStrategy,
+          });
+
+          const bootstrapMessages = this.checkpointManager.builder.bootstrapMessages(checkpoint);
+          try {
+            response = await this.collect(
+              app,
+              this.bodyFor(sessionId, '', this.queryFor({
+                messages: bootstrapMessages,
+                system: checkpoint.systemInstruction,
+                tools,
+                schema,
+                strategy: resolved.contextStrategy,
+                providerId,
+                appId,
+                forceSchema: true,
+              })),
+              options.signal,
+              currentAttachments,
+            );
+          } catch (error) {
+            this.conversations.invalidateGeneration({
+              dshConversationId: sessionId,
+              providerId,
+              difyAppId: appId,
+              backendId,
+              generation: target.generation,
+              reason: errorType(error),
+            });
+            rotationTelemetry = { ...rotationTelemetry, rotationFailureReason: errorType(error) };
+            throw error;
+          }
+
+          if (!response.conversationId) {
+            this.conversations.invalidateGeneration({
+              dshConversationId: sessionId,
+              providerId,
+              difyAppId: appId,
+              backendId,
+              generation: target.generation,
+              reason: 'ROTATION_MISSING_CONVERSATION_ID',
+            });
+            rotationTelemetry = { ...rotationTelemetry, rotationFailureReason: 'ROTATION_MISSING_CONVERSATION_ID' };
+            throw new LlmError('Dify rotation bootstrap did not return conversation_id', 'ROTATION_MISSING_CONVERSATION_ID');
+          }
+
+          const reduction = backendContextReductionPct(remote.lastBackendPromptTokens, response.usage?.inputTokens);
+          remote = this.conversations.activateGeneration({
+            dshConversationId: sessionId,
+            providerId,
+            difyAppId: appId,
+            backendId,
+            generation: target.generation,
+            conversationId: response.conversationId,
+            extra: {
+              toolSchemaHash: schema.toolSchemaHash,
+              ...(response.usage?.inputTokens === undefined ? {} : { lastBackendPromptTokens: response.usage.inputTokens }),
+            },
+          });
+          this.rotationRecommendations.clear(sessionId, backendId, providerId, appId);
+          rotationTelemetry = {
+            ...rotationTelemetry,
+            rotationSuccess: true,
+            newConversationIdHash: conversationHash(response.conversationId),
+            ...(reduction === undefined ? {} : { backendContextReductionPct: reduction }),
+          };
+          rotationSucceeded = true;
+          emitTrace(this.logger, {
+            traceId,
+            dshSessionIdHash: sessionHash(sessionId),
+            providerId,
+            difyAppId: appId,
+            backendId,
+            conversationState: ConversationState.ROTATE,
+            sourceGeneration: checkpoint.sourceGeneration,
+            targetGeneration: target.generation,
+            rotationSuccess: true,
+            oldConversationIdHash: rotationTelemetry.oldConversationIdHash,
+            newConversationIdHash: rotationTelemetry.newConversationIdHash,
+            ...(reduction === undefined ? {} : { backendContextReductionPct: reduction }),
+          });
+        }
+      }
+
       const request = async (conversationId, strategy) => this.collect(
         app,
         this.bodyFor(sessionId, conversationId, this.queryFor({
@@ -363,49 +547,58 @@ export class DifyAdapter extends LlmAdapter {
         currentAttachments,
       );
 
-      let response;
-      try {
-        response = await request(remote?.conversationId || '', resolved.contextStrategy);
-      } catch (error) {
-        if (!(remote?.conversationId && isInvalidConversationError(error))) throw error;
-        retryCount = 1;
-        this.conversations.invalidate(sessionId, providerId, appId);
-        resolved = resolveConversationState({ remoteState: remote, messages: originalMessages, toolResults, remoteInvalid: true });
-        emitTrace(this.logger, {
-          traceId,
-          dshSessionIdHash: sessionHash(sessionId),
-          providerId,
-          difyAppId: appId,
-          conversationState: ConversationState.RECOVER,
-          hasDifyConversationId: true,
-          attachmentCount: currentAttachments.length,
-          toolCount: tools.length,
-          toolSchemaChanged: schema.changed,
-          toolCallCount: 0,
-          toolResultCount: toolResults.length,
-          compressionMode: compression.result.mode,
-          compressionSavedTokens: compression.result.savedTokens,
-          compressionPasses: compression.result.compressionPasses,
-          compressionTargetReached: compression.result.targetReached,
-          compressionUnableToReachTarget: compression.result.unableToReachTarget,
-          retryCount,
-          latencyMs: Date.now() - startedAt,
-          status: 'recovering',
-        });
-        response = await request('', resolved.contextStrategy);
+      if (!rotationSucceeded) {
+        remote = this.conversations.get(sessionId, providerId, appId, backendId);
+        resolved = resolveConversationState({ remoteState: remote, messages: originalMessages, toolResults });
+        try {
+          response = await request(remote?.conversationId || '', resolved.contextStrategy);
+        } catch (error) {
+          if (!(remote?.conversationId && isInvalidConversationError(error))) throw error;
+          retryCount = 1;
+          this.conversations.invalidate(sessionId, providerId, appId, backendId);
+          resolved = resolveConversationState({ remoteState: { ...remote, valid: false }, messages: originalMessages, toolResults, remoteInvalid: true });
+          emitTrace(this.logger, {
+            traceId,
+            dshSessionIdHash: sessionHash(sessionId),
+            providerId,
+            difyAppId: appId,
+            backendId,
+            conversationState: ConversationState.RECOVER,
+            sourceGeneration: remote.generation,
+            hasDifyConversationId: true,
+            attachmentCount: currentAttachments.length,
+            toolCount: tools.length,
+            toolSchemaChanged: schema.changed,
+            toolCallCount: 0,
+            toolResultCount: toolResults.length,
+            compressionMode: compression.result.mode,
+            compressionSavedTokens: compression.result.savedTokens,
+            compressionPasses: compression.result.compressionPasses,
+            compressionTargetReached: compression.result.targetReached,
+            compressionUnableToReachTarget: compression.result.unableToReachTarget,
+            retryCount,
+            latencyMs: Date.now() - startedAt,
+            status: 'recovering',
+          });
+          response = await request('', resolved.contextStrategy);
+        }
+
+        const conversationId = response.conversationId || remote?.conversationId || '';
+        if (conversationId) {
+          remote = this.conversations.set(sessionId, providerId, appId, {
+            backendId,
+            conversationId,
+            valid: true,
+            updatedAt: Date.now(),
+            toolSchemaHash: schema.toolSchemaHash,
+            ...(response.usage?.inputTokens === undefined ? {} : { lastBackendPromptTokens: response.usage.inputTokens }),
+          });
+        }
       }
 
-      let conversationId = response.conversationId || remote?.conversationId || '';
-      if (conversationId) {
-        remote = this.conversations.set(sessionId, providerId, appId, {
-          conversationId,
-          valid: true,
-          updatedAt: Date.now(),
-          toolSchemaHash: schema.toolSchemaHash,
-        });
-      }
       for (const input of resultInputs) this.toolLedger.markForwarded(input);
 
+      let conversationId = response.conversationId || remote?.conversationId || '';
       let answer = response.answer;
       let usage = response.usage;
       let firstTokenAt = response.firstTokenAt;
@@ -429,15 +622,34 @@ export class DifyAdapter extends LlmAdapter {
         usage = replayResponse.usage || usage;
         firstTokenAt = firstTokenAt || replayResponse.firstTokenAt;
         conversationId = replayResponse.conversationId || conversationId;
-        if (conversationId) {
+        if (conversationId && remote) {
           this.conversations.set(sessionId, providerId, appId, {
+            backendId,
             conversationId,
             valid: true,
             updatedAt: Date.now(),
             toolSchemaHash: schema.toolSchemaHash,
+            ...(replayResponse.usage?.inputTokens === undefined ? {} : { lastBackendPromptTokens: replayResponse.usage.inputTokens }),
           });
         }
         calls = parseToolCalls(answer);
+      }
+
+      const reconciliation = reconcileBackendContext({
+        gatewayEstimatedInputTokens: canonicalRequest.estimatedPromptTokens,
+        gatewayCompressedTokens: compression.result.afterTokens,
+        backendPromptTokens: usage?.inputTokens,
+        backendCompletionTokens: usage?.outputTokens,
+      });
+      const nextRecommendation = this.checkpointRecommendation.recommend({
+        compressionResult: compression.result,
+        reconciliation,
+      });
+      if (nextRecommendation.recommended && !rotationSucceeded) {
+        this.rotationRecommendations.set(sessionId, backendId, providerId, appId, nextRecommendation);
+      }
+      if (rotationSucceeded && !nextRecommendation.recommended) {
+        this.rotationRecommendations.clear(sessionId, backendId, providerId, appId);
       }
 
       const gap = messagesAfterOwnAssistant(originalMessages, providerId, appId);
@@ -448,7 +660,9 @@ export class DifyAdapter extends LlmAdapter {
         dshSessionIdHash: sessionHash(sessionId),
         providerId,
         difyAppId: appId,
-        conversationState: resolved.state,
+        backendId,
+        conversationState: rotationSucceeded ? ConversationState.ROTATE : resolved.state,
+        sourceGeneration: remote?.generation || null,
         hasDifyConversationId: Boolean(conversationId),
         attachmentCount: currentAttachments.length,
         toolCount: tools.length,
