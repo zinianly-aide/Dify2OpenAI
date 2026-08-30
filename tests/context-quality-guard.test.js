@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  CheckpointRecommendation,
   CompressionPolicy,
   CompressionQualityGuard,
   ContextCompressor,
@@ -72,7 +73,7 @@ test('multiple heavy passes reach target and dispatch representation is final pa
     quality: { targetUtilization: 0.68, maxCompressionPasses: 2, minimumSavingsRatio: 0 },
   });
   const result = h.guard.run({ messages, initialProfile: profileFor(messages, 0.91), compressor: h.compressor, profiler: h.profiler });
-  console.log('QUALITY_GUARD_CASE_A_DEBUG', JSON.stringify({
+  console.log('QUALITY_GUARD_CASE_A', JSON.stringify({
     beforeUtilization: result.result.beforeUtilization,
     passes: result.passes,
     afterUtilization: result.result.afterUtilization,
@@ -117,7 +118,7 @@ test('no meaningful savings stops compression', () => {
   assert.ok(result.result.reasonCodes.includes('NO_MEANINGFUL_SAVINGS'));
 });
 
-test('protected context prevents target and every pass preserves invariants', () => {
+test('protected context prevents target, preserves invariants, and recommends checkpoint', () => {
   const tools = [{ type: 'function', function: { name: 'read_file', parameters: { type: 'object' } } }];
   const messages = [
     { role: 'system', content: `SYSTEM-MUST-STAY ${'core '.repeat(700)}` },
@@ -127,13 +128,31 @@ test('protected context prevents target and every pass preserves invariants', ()
     { role: 'user', content: `CURRENT-REQUEST-MUST-STAY ${'current '.repeat(700)}` },
     { role: 'assistant', tool_calls: [{ id: 'pending-call', type: 'function', function: { name: 'read_file', arguments: '{"path":"src/app.js"}' } }] },
   ];
-  const h = harness({ quality: { targetUtilization: 0.20, maxCompressionPasses: 2, minimumSavingsRatio: 0 } });
+  const h = harness({ quality: { targetUtilization: 0.68, maxCompressionPasses: 2, minimumSavingsRatio: 0 } });
   const result = h.guard.run({ messages, tools, initialProfile: profileFor(messages, 0.95, tools), compressor: h.compressor, profiler: h.profiler });
+  const recommendation = new CheckpointRecommendation().recommend({
+    compressionResult: result.result,
+    reconciliation: { gatewayCompressedTokens: result.result.afterTokens },
+  });
   assert.equal(result.result.targetReached, false);
   assert.equal(result.result.unableToReachTarget, true);
   assert.ok(result.result.reasonCodes.some((x) => x === 'PROTECTED_CONTEXT_DOMINATES' || x === 'MAX_PASSES_REACHED'));
+  assert.equal(recommendation.recommended, true);
+  assert.ok(recommendation.reasonCodes.includes('compression_target_unreachable'));
   assert.ok(result.messages.some((m) => m.role === 'system' && String(m.content).startsWith('SYSTEM-MUST-STAY')));
   assert.ok(result.messages.some((m) => m.role === 'developer' && String(m.content).startsWith('DEVELOPER-MUST-STAY')));
   assert.ok(result.messages.some((m) => m.role === 'user' && String(m.content).startsWith('CURRENT-REQUEST-MUST-STAY')));
   assert.ok(result.messages.some((m) => m.tool_calls?.some((call) => call.id === 'pending-call')));
+  console.log('QUALITY_GUARD_CASE_B', JSON.stringify({
+    beforeUtilization: result.result.beforeUtilization,
+    afterUtilization: result.result.afterUtilization,
+    targetUtilization: result.result.targetUtilization,
+    configuredMaxCompressionPasses: 2,
+    compressionPasses: result.result.compressionPasses,
+    targetReached: result.result.targetReached,
+    unableToReachTarget: result.result.unableToReachTarget,
+    stopReasons: result.result.reasonCodes.filter((code) => ['PROTECTED_CONTEXT_DOMINATES', 'MAX_PASSES_REACHED', 'NOT_ENOUGH_COMPRESSIBLE_HISTORY', 'NO_MEANINGFUL_SAVINGS'].includes(code)),
+    checkpointRecommended: recommendation.recommended,
+    checkpointReason: recommendation.reasonCodes,
+  }));
 });
