@@ -24,6 +24,7 @@ jobs:
           tests/policy-canary.test.js
           tests/policy-canary-final.test.js
           tests/policy-runtime-http.e2e.test.js
+          tests/policy-telemetry-failure.test.js
           tests/offline-policy.test.js
           tests/backend-routing.test.js
           tests/tool-optimization.test.js
