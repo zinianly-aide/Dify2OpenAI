@@ -1,7 +1,7 @@
 {
   "name": "@zinianly-aide/dify-core",
   "version": "0.1.0",
-  "description": "Shared Dify conversation lifecycle, adaptive context compression, decision telemetry and tool idempotency core",
+  "description": "Shared Dify conversation lifecycle, adaptive context compression, backend reconciliation, decision telemetry and tool idempotency core",
   "type": "module",
   "main": "./index.js",
   "exports": {
@@ -16,6 +16,8 @@
     "./context-profiler": "./context-profiler.js",
     "./compression-policy": "./compression-policy.js",
     "./context-compressor": "./context-compressor.js",
+    "./compression-quality-guard": "./compression-quality-guard.js",
+    "./backend-context": "./backend-context.js",
     "./decision-engine": "./decision-engine.js",
     "./decision-event": "./decision-event.js",
     "./telemetry-collector": "./telemetry-collector.js"
