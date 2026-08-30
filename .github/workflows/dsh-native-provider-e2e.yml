@@ -25,7 +25,7 @@ jobs:
       FAKE_DIFY_NATIVE_OUTPUT: /tmp/fake-dify-native-requests.json
       FAKE_DIFY_NATIVE_UPLOAD_OUTPUT: /tmp/fake-dify-native-uploads.json
       FAKE_DIFY_NATIVE_IMAGE_E2E: '1'
-      FAKE_DIFY_NATIVE_IMAGE_PATH: /tmp/dsh-native-read-image.png
+      FAKE_DIFY_NATIVE_IMAGE_PATH: dsh-native-read-image.png
       CI: 'true'
     steps:
       - name: Checkout
@@ -193,7 +193,7 @@ jobs:
           if (events.length < 2) throw new Error(`expected native decision events for main rounds, got ${events.length}`);
           const main = events.find((x) => x.telemetry?.toolCount > 0 && x.telemetry?.contextWindow === 32768);
           if (!main) throw new Error('missing main native decision event with context profile');
-          if (main.event?.decision?.compression !== 'none') throw new Error('static native policy unexpectedly enabled compression');
+          if (main.event?.decision?.compression !== 'none') throw new Error('native policy unexpectedly compressed a low-utilization request');
           if (!Array.isArray(main.event?.decision?.reasonCodes) || !main.event.decision.reasonCodes.includes('client=dsh')) {
             throw new Error('native decision reasonCodes missing client=dsh');
           }
