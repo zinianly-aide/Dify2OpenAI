@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { ConversationState, resolveConversationState } from '../lib/conversation-manager.js';
 import { conversationStore, toolSchemaRegistry, toolExecutionLedger } from '../lib/runtime.js';
 import { sha256 } from '../lib/canonical.js';
+import { currentImageAttachments, resolveDifyFiles } from '../lib/attachments.js';
 
 const PROVIDER = 'dify';
 const textOf = (m) => typeof m?.content === 'string' ? m.content : Array.isArray(m?.content) ? m.content.filter(x=>x?.type==='text').map(x=>x.text||'').join('\n') : '';
@@ -28,32 +29,41 @@ function schemaPrompt(tools){if(!tools?.length)return'';return `External tools a
 function parseToolCalls(answer=''){const candidates=[answer.trim(),answer.replace(/^```json\s*/i,'').replace(/```$/,'').trim()];for(const c of candidates){try{const j=JSON.parse(c);if(Array.isArray(j?.tool_calls))return j.tool_calls;}catch{}}const out=[];const re=/```(?:bash|sh|shell)\s*\n([\s\S]*?)```/gi;let m;while((m=re.exec(answer)))out.push({id:`call_${sha256(m[1]).slice(0,16)}`,type:'function',function:{name:'bash',arguments:JSON.stringify({command:m[1].trim()})}});return out;}
 function recordIncomingToolResults(providerId,dshConversationId,messages){const{calls,results}=extractToolInfo(messages);for(const r of results){const c=calls.get(r.tool_call_id);if(!c)continue;toolExecutionLedger.complete({providerId,conversationId:dshConversationId,toolCallId:c.id,arguments:c.function?.arguments||'{}'},textOf(r));}}
 const isInvalidConversation=(status,body)=>[400,404].includes(status)&&/conversation|not found|invalid/i.test(body||'');
-async function callDify(config,body){const resp=await fetch(`${config.DIFY_API_URL}/chat-messages`,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${config.API_KEY}`},body:JSON.stringify(body)});const raw=await resp.text();let json=null;try{json=JSON.parse(raw)}catch{}return{ok:resp.ok,status:resp.status,raw,json};}
+async function callDify(config,body,attachments=[]){
+ const files=await resolveDifyFiles({baseURL:config.DIFY_API_URL,apiKey:config.API_KEY,attachments,user:body.user});
+ const payload=files.length?{...body,files}:body;
+ const resp=await fetch(`${config.DIFY_API_URL}/chat-messages`,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${config.API_KEY}`},body:JSON.stringify(payload)});
+ const raw=await resp.text();let json=null;try{json=JSON.parse(raw)}catch{}return{ok:resp.ok,status:resp.status,raw,json};
+}
 function openAIResponse(data,answer,toolCalls,traceId){return{id:`chatcmpl-${traceId}`,object:'chat.completion',created:Math.floor(Date.now()/1000),model:data.model||'dify',choices:[{index:0,message:{role:'assistant',content:toolCalls.length?null:answer,...(toolCalls.length?{tool_calls:toolCalls}:{})},finish_reason:toolCalls.length?'tool_calls':'stop'}],usage:{prompt_tokens:0,completion_tokens:0,total_tokens:0}};}
 function send(res,data,payload){if(!data.stream)return res.json(payload);res.setHeader('Content-Type','text/event-stream');const msg=payload.choices[0].message;res.write(`data: ${JSON.stringify({id:payload.id,object:'chat.completion.chunk',created:payload.created,model:payload.model,choices:[{index:0,delta:{role:'assistant',...(msg.content?{content:msg.content}:{}),...(msg.tool_calls?{tool_calls:msg.tool_calls.map((x,index)=>({index,...x}))}:{})},finish_reason:payload.choices[0].finish_reason}]})}\n\n`);res.end('data: [DONE]\n\n');}
 
 async function handleRequest(req,res,config){
- const data=req.body||{},messages=Array.isArray(data.messages)?data.messages:[],traceId=randomUUID(),dshConversationId=dshIdOf(req),providerId=String(req.headers['x-provider-id']||PROVIDER),difyAppId=appIdOf(req,config);
+ const data=req.body||{},messages=Array.isArray(data.messages)?data.messages:[],traceId=randomUUID(),dshConversationId=dshIdOf(req),providerId=String(req.headers['x-provider-id']||PROVIDER),difyAppId=appIdOf(req,config),currentAttachments=currentImageAttachments(messages,'openai');
  if(resetOf(req)){conversationStore.resetProvider(dshConversationId,providerId,difyAppId);trace({traceId,dshConversationId,providerId,difyAppId,conversationState:'RESET',contextStrategy:'FULL_BOOTSTRAP'});}
  let remote=conversationStore.get(dshConversationId,providerId,difyAppId),resolved=resolveConversationState({remoteState:remote,messages,reset:false});
  const schema=toolSchemaRegistry.resolve({dshConversationId,providerId,difyAppId,tools:data.tools||[]});recordIncomingToolResults(providerId,dshConversationId,messages);
  const buildQuery=(strategy)=>{let q=strategy==='DELTA_CONTINUE'?deltaHistory(messages):strategy==='TOOL_CONTINUE'?toolContinuation(messages):fullHistory(messages);if(schema.changed&&data.tools?.length)q=`${schemaPrompt(data.tools)}\n\n${q}`;return q;};
  const makeBody=(conversationId,strategy)=>({inputs:{},query:buildQuery(strategy),response_mode:'blocking',conversation_id:conversationId||'',user:String(data.user||dshConversationId),auto_generate_name:false});
- trace({traceId,dshConversationId,providerId,difyConversationId:remote?.conversationId||'',conversationState:resolved.state,toolSchemaHash:schema.toolSchemaHash,contextStrategy:resolved.contextStrategy,event:schema.traceEvent});
- let result=await callDify(config,makeBody(remote?.conversationId,resolved.contextStrategy));
+ const attachmentsFor=(strategy)=>strategy==='TOOL_CONTINUE'?[]:currentAttachments;
+ trace({traceId,dshConversationId,providerId,difyConversationId:remote?.conversationId||'',conversationState:resolved.state,attachmentCount:attachmentsFor(resolved.contextStrategy).length,toolSchemaHash:schema.toolSchemaHash,contextStrategy:resolved.contextStrategy,event:schema.traceEvent});
+ let result;
+ try{result=await callDify(config,makeBody(remote?.conversationId,resolved.contextStrategy),attachmentsFor(resolved.contextStrategy));}
+ catch(error){responseLocals(res).gatewayErrorType=String(error?.code||'dify_attachment_error');return res.status(error?.status||502).json({error:{message:error?.message||'Dify attachment processing failed',type:'dify_attachment_error',trace_id:traceId}});}
  if(!result.ok&&remote?.conversationId&&isInvalidConversation(result.status,result.raw)){
    conversationStore.invalidate(dshConversationId,providerId,difyAppId);
    resolved=resolveConversationState({remoteState:conversationStore.get(dshConversationId,providerId,difyAppId),messages,remoteInvalid:true});
-   trace({traceId,dshConversationId,providerId,difyConversationId:remote.conversationId,conversationState:ConversationState.RECOVER,toolSchemaHash:schema.toolSchemaHash,contextStrategy:resolved.contextStrategy});
+   trace({traceId,dshConversationId,providerId,difyConversationId:remote.conversationId,conversationState:ConversationState.RECOVER,attachmentCount:attachmentsFor(resolved.contextStrategy).length,toolSchemaHash:schema.toolSchemaHash,contextStrategy:resolved.contextStrategy});
    const locals=responseLocals(res);
    locals.gatewayRetryCount=Number(locals.gatewayRetryCount||0)+1;
-   result=await callDify(config,makeBody('',resolved.contextStrategy));
+   try{result=await callDify(config,makeBody('',resolved.contextStrategy),attachmentsFor(resolved.contextStrategy));}
+   catch(error){locals.gatewayErrorType=String(error?.code||'dify_attachment_error');return res.status(error?.status||502).json({error:{message:error?.message||'Dify attachment processing failed',type:'dify_attachment_error',trace_id:traceId}});}
  }
  if(!result.ok){responseLocals(res).gatewayErrorType='dify_error';return res.status(result.status||502).json({error:{message:result.json?.message||result.raw||'Dify request failed',type:'dify_error',trace_id:traceId}});}
  const difyConversationId=result.json?.conversation_id||remote?.conversationId||'';if(difyConversationId)remote=conversationStore.set(dshConversationId,providerId,difyAppId,{conversationId:difyConversationId,valid:true,updatedAt:Date.now(),toolSchemaHash:schema.toolSchemaHash});
  let answer=String(result.json?.answer||''),toolCalls=parseToolCalls(answer);const emitted=[],replay=[];
  for(const c of toolCalls){const args=c.function?.arguments||'{}',entry=toolExecutionLedger.begin({providerId,conversationId:dshConversationId,toolCallId:c.id,arguments:args});trace({traceId,dshConversationId,providerId,difyConversationId,conversationState:resolved.state,toolSchemaHash:schema.toolSchemaHash,toolCallId:c.id,argumentsHash:entry.argumentsHash,toolExecutionStatus:entry.status,contextStrategy:resolved.contextStrategy});if(entry.replay)replay.push({call:c,result:entry.result});else if(!entry.duplicate)emitted.push(c);}
- if(replay.length&&!emitted.length){const replayQuery=replay.map(x=>`tool_result tool_call_id=${x.call.id}: ${x.result}`).join('\n');const continued=await callDify(config,{...makeBody(difyConversationId,'TOOL_CONTINUE'),query:replayQuery});if(continued.ok){answer=String(continued.json?.answer||'');toolCalls=parseToolCalls(answer);for(const c of toolCalls){const e=toolExecutionLedger.begin({providerId,conversationId:dshConversationId,toolCallId:c.id,arguments:c.function?.arguments||'{}'});if(!e.duplicate)emitted.push(c);}}}
+ if(replay.length&&!emitted.length){const replayQuery=replay.map(x=>`tool_result tool_call_id=${x.call.id}: ${x.result}`).join('\n');const continued=await callDify(config,{...makeBody(difyConversationId,'TOOL_CONTINUE'),query:replayQuery},[]);if(continued.ok){answer=String(continued.json?.answer||'');toolCalls=parseToolCalls(answer);for(const c of toolCalls){const e=toolExecutionLedger.begin({providerId,conversationId:dshConversationId,toolCallId:c.id,arguments:c.function?.arguments||'{}'});if(!e.duplicate)emitted.push(c);}}}
  send(res,data,openAIResponse(data,answer,emitted,traceId));
 }
 export default{handleRequest};
