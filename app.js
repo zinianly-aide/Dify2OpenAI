@@ -53,8 +53,8 @@ app.use(express.json({limit:"100mb"}));
 app.use(express.urlencoded({limit:"100mb",extended:true}));
 
 app.get("/", (req,res)=>res.sendFile(path.join(__dirname,'public/index.html')));
-app.get("/v1/models", (req,res)=>res.json({object:"list",data:[{id:"dify",object:"model",owned_by:"dify",permission:null,capabilities:{vision:true,file_processing:true,tools:true,conversation_lifecycle:true}}]}));
-app.get("/capabilities", (req,res)=>res.json({openai_compatible:true,chat_completions:true,tools:true,tool_call_id_correlation:true,provider_scoped_conversations:true,conversation_lifecycle_activation:"x-dsh-conversation-id",legacy_chat_fallback:true,conversation_states:["BOOTSTRAP","CONTINUE","TOOL_CONTINUE","RECOVER","RESET"],context_strategies:["FULL_BOOTSTRAP","DELTA_CONTINUE","TOOL_CONTINUE","RECOVERY_BOOTSTRAP"],tool_schema_hashing:"sha256",tool_execution_idempotency:true,decision_telemetry:true,decision_policy:"gateway-static-v1",automatic_optimization:false}));
+app.get("/v1/models", (req,res)=>res.json({object:"list",data:[{id:"dify",object:"model",owned_by:"dify",permission:null,capabilities:{vision:true,file_processing:true,tools:true,conversation_lifecycle:true,context_compression:true}}]}));
+app.get("/capabilities", (req,res)=>res.json({openai_compatible:true,chat_completions:true,tools:true,tool_call_id_correlation:true,provider_scoped_conversations:true,conversation_lifecycle_activation:"x-dsh-conversation-id",legacy_chat_fallback:true,conversation_states:["BOOTSTRAP","CONTINUE","TOOL_CONTINUE","RECOVER","RESET"],context_strategies:["FULL_BOOTSTRAP","DELTA_CONTINUE","TOOL_CONTINUE","RECOVERY_BOOTSTRAP"],tool_schema_hashing:"sha256",tool_execution_idempotency:true,decision_telemetry:true,decision_policy:"gateway-context-compression-v1",context_compression:true,context_compression_modes:["none","tool_prune","light","heavy"],context_compression_configurable:true,automatic_threshold_tuning:false,automatic_routing:false,automatic_optimization:false}));
 
 app.post("/v1/chat/completions", async (req,res)=>{
   const requestId=generateId(); const startTime=Date.now(); logRequest(req,requestId);
