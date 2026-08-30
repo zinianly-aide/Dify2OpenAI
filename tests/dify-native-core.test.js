@@ -1,6 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ToolSchemaRegistry } from '../packages/dify-core/tool-schema-registry.js';
+import {
+  CanonicalRequest,
+  CanonicalResponse,
+  ContextProfiler,
+  DecisionEngine,
+  TelemetryCollector,
+  ToolSchemaRegistry,
+  backendIdFromUrl,
+} from '../packages/dify-core/index.js';
 import {
   deltaHistory,
   findToolCall,
@@ -60,4 +68,46 @@ test('native tool result correlation uses exact toolCallId', () => {
   assert.equal(findToolCall(messages, 'call_123'), call);
   assert.equal(findToolCall(messages, 'call_999'), null);
   assert.deepEqual(tailToolResults(messages), [result]);
+});
+
+test('native DSH request uses the same canonical decision model without leaking session or prompt', () => {
+  const secretSession = 'session-native-secret-123';
+  const secretPrompt = 'private prompt that must not enter telemetry';
+  const options = {
+    provider: 'dify',
+    model: 'default',
+    sessionId: secretSession,
+    messages: [user('u1', secretPrompt)],
+    tools: [tool('bash')],
+  };
+  const request = CanonicalRequest.fromDsh(options, {
+    traceId: 'trace-native-1',
+    backendId: backendIdFromUrl('https://dify.example/v1'),
+    contextWindow: 32768,
+  });
+  const profile = new ContextProfiler().profile(request);
+  const decision = new DecisionEngine().decide(request, profile);
+  let payload;
+  const collector = new TelemetryCollector({ sink: (value) => { payload = value; } });
+  collector.collect(request, decision, new CanonicalResponse({
+    success: true,
+    latencyMs: 23,
+    firstTokenLatencyMs: 11,
+    promptTokens: 101,
+    completionTokens: 17,
+    retryCount: 0,
+  }));
+
+  assert.equal(request.clientType, 'dsh');
+  assert.equal(request.contextWindow, 32768);
+  assert.ok(request.contextUtilization > 0);
+  assert.equal(request.toolCount, 1);
+  assert.equal(decision.compression, 'none');
+  assert.ok(decision.reasonCodes.includes('client=dsh'));
+  assert.ok(decision.reasonCodes.some((code) => code.startsWith('context_utilization=')));
+  assert.equal(payload.telemetry.sessionIdHash.length, 24);
+  const serialized = JSON.stringify(payload);
+  assert.doesNotMatch(serialized, new RegExp(secretSession));
+  assert.doesNotMatch(serialized, new RegExp(secretPrompt));
+  assert.doesNotMatch(serialized, /dify\.example/);
 });
