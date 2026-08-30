@@ -43,6 +43,7 @@ function normalizeBackend(input = {}) {
     model: input.model === undefined ? undefined : String(input.model),
     enabled: input.enabled !== false,
     priority: Number.isFinite(Number(input.priority)) ? Number(input.priority) : 100,
+    credentialEnv: input.credentialEnv === undefined ? undefined : String(input.credentialEnv),
     capabilities: new BackendCapabilities({
       maxContextWindow: input.maxContextWindow ?? input.capabilities?.maxContextWindow,
       supportsTools: input.supportsTools ?? input.capabilities?.supportsTools,
