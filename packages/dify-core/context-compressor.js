@@ -25,6 +25,11 @@ function isCoreInstruction(message) {
   return message?.role === 'system' || message?.role === 'developer';
 }
 
+function isHumanUserMessage(message) {
+  if (message?.role !== 'user') return false;
+  return message?.source?.kind !== 'tool';
+}
+
 function toolCallIds(message) {
   const ids = [];
   if (Array.isArray(message?.tool_calls)) {
@@ -50,12 +55,12 @@ function toolResultIds(message) {
 }
 
 function isToolMessage(message) {
-  return toolCallIds(message).length > 0 || toolResultIds(message).length > 0 || message?.role === 'tool' || message?.role === 'function';
+  return toolCallIds(message).length > 0 || toolResultIds(message).length > 0 || message?.role === 'tool' || message?.role === 'function' || message?.source?.kind === 'tool';
 }
 
 function recentTurnIndexes(messages, count) {
   const userIndexes = [];
-  for (let i = 0; i < messages.length; i += 1) if (messages[i]?.role === 'user') userIndexes.push(i);
+  for (let i = 0; i < messages.length; i += 1) if (isHumanUserMessage(messages[i])) userIndexes.push(i);
   const start = userIndexes.length > count ? userIndexes[userIndexes.length - count] : 0;
   const out = new Set();
   for (let i = start; i < messages.length; i += 1) out.add(i);
@@ -150,25 +155,26 @@ export class ContextCompressor {
     const input = Array.isArray(messages) ? messages : [];
     const beforeTokens = estimateConversation(input, tools, system);
     const decision = this.policy.decide(profile);
+    const config = decision.config || this.policy.config;
     if (decision.mode === 'none' || input.length === 0) {
       return {
         messages: input,
         result: new CompressionResult({
           mode: 'none', beforeTokens, afterTokens: beforeTokens, savedTokens: 0,
-          preservedRecentTurns: this.policy.config.preservedRecentTurns,
+          preservedRecentTurns: config.preservedRecentTurns,
           reasonCodes: [...decision.reasonCodes, 'compression_no_changes'],
         }),
       };
     }
 
-    const recent = recentTurnIndexes(input, this.policy.config.preservedRecentTurns);
+    const recent = recentTurnIndexes(input, config.preservedRecentTurns);
     const toolChains = toolChainIndexes(input);
     const preserve = new Set();
     for (let i = 0; i < input.length; i += 1) {
       if (isCoreInstruction(input[i]) || recent.has(i) || toolChains.has(i)) preserve.add(i);
     }
-    const latestUser = [...input.keys()].reverse().find((i) => input[i]?.role === 'user');
-    if (latestUser !== undefined) preserve.add(latestUser);
+    const latestHumanUser = [...input.keys()].reverse().find((i) => isHumanUserMessage(input[i]));
+    if (latestHumanUser !== undefined) preserve.add(latestHumanUser);
 
     const removed = [];
     const retained = [];
@@ -185,8 +191,8 @@ export class ContextCompressor {
 
     if ((decision.mode === 'light' || decision.mode === 'heavy') && removed.length) {
       const maxChars = decision.mode === 'heavy'
-        ? this.policy.config.heavySummaryMaxChars
-        : this.policy.config.lightSummaryMaxChars;
+        ? config.heavySummaryMaxChars
+        : config.lightSummaryMaxChars;
       const summary = summaryMessage(removed, maxChars);
       summary.categories.forEach((x) => categories.add(x));
       if (summary.message) {
@@ -203,9 +209,10 @@ export class ContextCompressor {
     const reasonCodes = [
       ...decision.reasonCodes,
       `compression_removed_messages=${removed.length}`,
-      `compression_preserved_recent_turns=${this.policy.config.preservedRecentTurns}`,
+      `compression_preserved_recent_turns=${config.preservedRecentTurns}`,
       ...[...categories].sort().map((category) => `compression_category=${category}`),
       ...(toolChains.size ? ['compression_preserved_tool_chain'] : []),
+      ...(latestHumanUser !== undefined ? ['compression_preserved_current_user_request'] : []),
       ...(decision.forced ? ['compression_forced=true'] : []),
     ];
     return {
@@ -215,7 +222,7 @@ export class ContextCompressor {
         beforeTokens,
         afterTokens,
         savedTokens,
-        preservedRecentTurns: this.policy.config.preservedRecentTurns,
+        preservedRecentTurns: config.preservedRecentTurns,
         reasonCodes,
       }),
     };
