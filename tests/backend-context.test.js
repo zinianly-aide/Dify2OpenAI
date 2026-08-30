@@ -20,13 +20,26 @@ test('gateway 30k and backend 30k yields amplification 1.0', () => {
   assert.equal(reconciled.contextAmplification, 1);
 });
 
-test('gateway 30k and backend 90k yields amplification 3.0', () => {
+test('gateway 30k and backend 90k yields amplification 3.0 and recommends checkpoint', () => {
   const reconciled = reconcileBackendContext({
     gatewayEstimatedInputTokens: 50000,
     gatewayCompressedTokens: 30000,
     backendPromptTokens: 90000,
   });
+  const recommendation = new CheckpointRecommendation().recommend({
+    compressionResult: { unableToReachTarget: false },
+    reconciliation: reconciled,
+  });
   assert.equal(reconciled.contextAmplification, 3);
+  assert.equal(recommendation.recommended, true);
+  assert.ok(recommendation.reasonCodes.includes('backend_context_amplification_high'));
+  console.log('BACKEND_CONTEXT_CASE_C', JSON.stringify({
+    gatewayCompressedTokens: reconciled.gatewayCompressedTokens,
+    backendPromptTokens: reconciled.backendPromptTokens,
+    contextAmplification: reconciled.contextAmplification,
+    checkpointRecommended: recommendation.recommended,
+    checkpointReason: recommendation.reasonCodes,
+  }));
 });
 
 test('backend usage unavailable stays unknown and never uses gateway estimate as actual usage', () => {
@@ -36,6 +49,12 @@ test('backend usage unavailable stays unknown and never uses gateway estimate as
   });
   assert.equal(reconciled.backendPromptTokens, undefined);
   assert.equal(reconciled.contextAmplification, undefined);
+  console.log('BACKEND_CONTEXT_CASE_D', JSON.stringify({
+    gatewayEstimatedInputTokens: reconciled.gatewayEstimatedInputTokens,
+    gatewayCompressedTokens: reconciled.gatewayCompressedTokens,
+    backendPromptTokens: 'unknown',
+    contextAmplification: 'unknown',
+  }));
 });
 
 test('generic and Dify usage extractors return only reported backend usage', () => {
@@ -46,6 +65,7 @@ test('generic and Dify usage extractors return only reported backend usage', () 
   assert.deepEqual(dify.extract({ metadata: { usage: { prompt_tokens: 90, completion_tokens: 5 } } }), { backendPromptTokens: 90, backendCompletionTokens: 5 });
   assert.deepEqual(aggregate.extract({ usage: { input_tokens: 7, output_tokens: 2 } }), { backendPromptTokens: 7, backendCompletionTokens: 2 });
   assert.equal(dify.extract({ metadata: {} }), undefined);
+  assert.equal(dify.extract({ metadata: { usage: { total_tokens: 100 } } }), undefined);
 });
 
 test('unableToReachTarget recommends checkpoint without executing it', () => {
