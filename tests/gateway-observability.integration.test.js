@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { GatewayObserver } from '../lib/gateway/gateway-observer.js';
 import { TelemetryCollector } from '../lib/gateway/telemetry-collector.js';
+import { estimateConversationTokens } from '../packages/dify-core/index.js';
 
 class MockResponse extends EventEmitter {
   constructor() {
@@ -24,6 +25,20 @@ class MockResponse extends EventEmitter {
     if (chunk) this.write(chunk);
     this.emit('finish');
   }
+}
+
+function twoPassMessages() {
+  const messages = [
+    { role: 'system', content: 'SYSTEM-CORE-MUST-STAY' },
+    { role: 'developer', content: 'DEVELOPER-CORE-MUST-STAY' },
+  ];
+  for (let i = 0; i < 10; i += 1) {
+    const refs = Array.from({ length: 24 }, (_, j) => `src/feature-${i}/module-${j}/symbol-${i}-${j}.js`).join(' ');
+    messages.push({ role: 'user', content: `old request ${i} ${refs}` });
+    messages.push({ role: 'assistant', content: `DONE ${refs}` });
+  }
+  messages.push({ role: 'user', content: `CURRENT-REQUEST-MUST-STAY ${'protected-current-context '.repeat(1100)}` });
+  return messages;
 }
 
 test('integration: SSE request produces sanitized decision event with latency and usage', async () => {
@@ -73,7 +88,8 @@ test('integration: SSE request produces sanitized decision event with latency an
   assert.ok(event.decision.reasonCodes.some((code) => code.startsWith('context_utilization=')));
   assert.equal(record.providerId, 'dify');
   assert.equal(record.completionTokens, 7);
-  assert.equal(record.success, true);
+  assert.equal(record.backendPromptTokens, 123);
+  assert.equal(record.backendCompletionTokens, 7);
   assert.match(record.backendId, /^dify-[a-f0-9]{12}$/);
 
   const serialized = JSON.stringify(emitted[0]);
@@ -130,4 +146,77 @@ test('integration: high-utilization OpenAI request is compressed before downstre
   const serialized = JSON.stringify(emitted[0]);
   assert.equal(serialized.includes('compression-session-private'), false);
   assert.equal(serialized.includes('redundant historical context'), false);
+});
+
+test('integration: quality guard performs two heavy passes and downstream sees final pass messages', async () => {
+  const emitted = [];
+  const telemetry = new TelemetryCollector({ sink: (payload) => emitted.push(payload) });
+  const observer = new GatewayObserver({
+    telemetry,
+    compressionConfig: {
+      preservedRecentTurns: 1,
+      heavySummaryMaxChars: 14000,
+      strongerHeavySummaryMaxChars: 300,
+    },
+    compressionQualityConfig: {
+      targetUtilization: 0.68,
+      maxCompressionPasses: 2,
+      minimumSavingsRatio: 0,
+    },
+  });
+  const messages = twoPassMessages();
+  const initialTokens = estimateConversationTokens(messages, []);
+  const req = {
+    headers: {
+      'user-agent': 'codex-cli/1.0',
+      'x-session-id': 'two-pass-private-session',
+      'x-context-window': String(initialTokens / 0.91),
+    },
+    body: { model: 'dify', messages, tools: [] },
+  };
+  const res = new MockResponse();
+  const observed = observer.observe(req, res, {
+    traceId: 'trace-two-pass-integration',
+    providerId: 'dify',
+    backendId: 'dify-test-backend',
+  });
+
+  assert.equal(observed.compressionPasses.length, 2);
+  assert.equal(observed.compressionPasses[0].mode, 'heavy');
+  assert.equal(observed.compressionPasses[1].mode, 'heavy');
+  assert.ok(observed.compressionPasses[0].afterUtilization > 0.68);
+  assert.ok(observed.compressionPasses[1].afterUtilization <= 0.68);
+  assert.equal(observed.compressionResult.compressionPasses, 2);
+  assert.equal(observed.compressionResult.targetReached, true);
+  assert.equal(estimateConversationTokens(req.body.messages, []), observed.compressionResult.afterTokens);
+  assert.ok(req.body.messages.some((m) => m.content === 'SYSTEM-CORE-MUST-STAY'));
+  assert.ok(req.body.messages.some((m) => m.content === 'DEVELOPER-CORE-MUST-STAY'));
+  assert.ok(req.body.messages.some((m) => String(m.content).startsWith('CURRENT-REQUEST-MUST-STAY')));
+
+  res.locals.gatewayBackendUsage = { backendPromptTokens: 90000, backendCompletionTokens: 1000 };
+  res.json({ choices: [{ message: { role: 'assistant', content: 'ok' } }] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(emitted.length, 1);
+  assert.equal(emitted[0].telemetry.compressionPasses, 2);
+  assert.equal(emitted[0].telemetry.gatewayCompressedTokens, observed.compressionResult.afterTokens);
+  assert.equal(emitted[0].telemetry.backendPromptTokens, 90000);
+  assert.ok(emitted[0].telemetry.contextAmplification > 1);
+});
+
+test('integration: unavailable backend usage stays unknown rather than copying gateway estimates', async () => {
+  const emitted = [];
+  const observer = new GatewayObserver({ telemetry: new TelemetryCollector({ sink: (payload) => emitted.push(payload) }) });
+  const req = {
+    headers: { 'x-context-window': '10000' },
+    body: { model: 'dify', messages: [{ role: 'user', content: 'current request' }], tools: [] },
+  };
+  const res = new MockResponse();
+  observer.observe(req, res, { traceId: 'trace-unknown-backend-usage', providerId: 'dify', backendId: 'dify-test' });
+  res.json({ choices: [{ message: { role: 'assistant', content: 'ok' } }] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(emitted.length, 1);
+  assert.equal(emitted[0].telemetry.backendPromptTokens, null);
+  assert.equal(emitted[0].telemetry.contextAmplification, null);
+  assert.ok(emitted[0].telemetry.gatewayEstimatedInputTokens > 0);
+  assert.ok(emitted[0].telemetry.gatewayCompressedTokens > 0);
 });
