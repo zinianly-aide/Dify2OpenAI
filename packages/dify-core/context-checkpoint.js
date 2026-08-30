@@ -101,6 +101,7 @@ export class CanonicalContextBuilder {
       importantDecisions: Object.freeze(metadata.decisions),
       pendingToolState,
       instructions: Object.freeze([...instructions]),
+      systemInstruction: typeof system === 'string' ? system : undefined,
       currentTask: currentTask || null,
       estimatedTokens: estimateConversationTokens([...instructions, ...(deterministicSummary ? [{ role: 'assistant', gatewayCheckpointSummary: true, content: deterministicSummary }] : []), ...recentWithoutInstructions], tools, system),
     });
@@ -166,6 +167,7 @@ export class CheckpointManager {
       importantDecisions: built.importantDecisions,
       pendingToolState: built.pendingToolState,
       instructions: built.instructions,
+      systemInstruction: built.systemInstruction,
       currentTask: built.currentTask,
       estimatedTokensBefore: Number(compressionResult?.beforeTokens || 0),
       estimatedTokensAfter: Number(built.estimatedTokens || compressionResult?.afterTokens || 0),
