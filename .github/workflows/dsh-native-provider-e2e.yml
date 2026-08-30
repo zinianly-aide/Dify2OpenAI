@@ -19,6 +19,8 @@ jobs:
       DIFY_API_URL: http://127.0.0.1:39125
       DIFY_API_KEY: test-key
       DIFY_TIMEOUT: '120000'
+      DIFY_CONTEXT_WINDOW: '32768'
+      DIFY_TELEMETRY_STDOUT: '1'
       FAKE_DIFY_NATIVE_PORT: '39125'
       FAKE_DIFY_NATIVE_OUTPUT: /tmp/fake-dify-native-requests.json
       CI: 'true'
@@ -80,7 +82,7 @@ jobs:
           output=$(timeout 120s dsh --profile headless "Return the provider response. If a tool is requested, execute it and continue." 2>&1)
           code=$?
           set -e
-          echo "$output"
+          printf '%s\n' "$output" | tee /tmp/dsh-native-output.log
           if [ "$code" -ne 0 ]; then
             cat /tmp/fake-dify-native.log || true
             exit "$code"
@@ -110,7 +112,7 @@ jobs:
           if (auxiliaries.some((r) => (r.body.conversation_id || '') !== '')) {
             throw new Error('auxiliary DSH calls must not reuse the main Dify conversation');
           }
-          if (bootstrap.headers.authorization !== 'Bearer test-key') throw new Error('native provider did not use configured Dify credential');
+          if (bootstrap.headers.authorization !== '***') throw new Error('native provider did not use configured Dify credential');
           console.log(JSON.stringify({
             result: 'PASS',
             requestCount: requests.length,
@@ -126,9 +128,47 @@ jobs:
           }, null, 2));
           NODE
 
+      - name: Verify native decision telemetry
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const output = fs.readFileSync('/tmp/dsh-native-output.log', 'utf8');
+          const events = [];
+          for (const line of output.split(/\r?\n/)) {
+            const start = line.indexOf('{');
+            if (start < 0) continue;
+            try {
+              const parsed = JSON.parse(line.slice(start));
+              if (parsed.component === 'gateway-decision' && parsed.source === 'dsh-dify-provider') events.push(parsed);
+            } catch {}
+          }
+          if (events.length < 2) throw new Error(`expected native decision events for main rounds, got ${events.length}`);
+          const main = events.find((x) => x.telemetry?.toolCount > 0 && x.telemetry?.contextWindow === 32768);
+          if (!main) throw new Error('missing main native decision event with context profile');
+          if (main.event?.decision?.compression !== 'none') throw new Error('static native policy unexpectedly enabled compression');
+          if (!Array.isArray(main.event?.decision?.reasonCodes) || !main.event.decision.reasonCodes.includes('client=dsh')) {
+            throw new Error('native decision reasonCodes missing client=dsh');
+          }
+          if (!main.event.decision.reasonCodes.some((code) => code.startsWith('context_utilization='))) {
+            throw new Error('native context utilization reasonCode missing');
+          }
+          if (!main.telemetry.sessionIdHash || main.telemetry.sessionIdHash.length !== 24) throw new Error('native session hash missing');
+          if (!(main.telemetry.toolSchemaEstimatedTokens > 0)) throw new Error('native tool schema token estimate missing');
+          if (main.telemetry.success !== true) throw new Error('native telemetry did not record success');
+          if (output.includes('test-key')) throw new Error('native output leaked API key');
+          if (output.includes('Return the provider response. If a tool is requested, execute it and continue.')) {
+            throw new Error('native telemetry/output leaked complete task prompt');
+          }
+          console.log('REAL_NATIVE_DECISION_EVENT ' + JSON.stringify(main.event));
+          console.log('REAL_NATIVE_TELEMETRY ' + JSON.stringify(main.telemetry));
+          NODE
+
       - name: Show native provider logs
         if: always()
         shell: bash
         run: |
           echo '--- fake dify native ---'
           cat /tmp/fake-dify-native.log || true
+          echo '--- dsh native output ---'
+          cat /tmp/dsh-native-output.log || true
