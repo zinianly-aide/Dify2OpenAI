@@ -6,6 +6,7 @@ export const DEFAULT_COMPRESSION_CONFIG = Object.freeze({
   preservedRecentTurns: 3,
   lightSummaryMaxChars: 2400,
   heavySummaryMaxChars: 1200,
+  strongerHeavySummaryMaxChars: 400,
   rules: [],
 });
 
@@ -48,6 +49,7 @@ export function compressionConfigFromEnv(env = process.env) {
     preservedRecentTurns: positiveInteger(env.GATEWAY_COMPRESSION_RECENT_TURNS, DEFAULT_COMPRESSION_CONFIG.preservedRecentTurns),
     lightSummaryMaxChars: positiveInteger(env.GATEWAY_COMPRESSION_LIGHT_SUMMARY_MAX_CHARS, DEFAULT_COMPRESSION_CONFIG.lightSummaryMaxChars),
     heavySummaryMaxChars: positiveInteger(env.GATEWAY_COMPRESSION_HEAVY_SUMMARY_MAX_CHARS, DEFAULT_COMPRESSION_CONFIG.heavySummaryMaxChars),
+    strongerHeavySummaryMaxChars: positiveInteger(env.GATEWAY_COMPRESSION_STRONG_HEAVY_SUMMARY_MAX_CHARS, DEFAULT_COMPRESSION_CONFIG.strongerHeavySummaryMaxChars),
     rules: [],
   };
 }
@@ -86,26 +88,17 @@ export class CompressionPolicy {
       ...(ruleId ? [`compression_rule=${ruleId}`] : ['compression_rule=default']),
     ];
     if (utilization === undefined || utilization === null || !Number.isFinite(Number(utilization))) {
-      return Object.freeze({
-        mode: 'none',
-        forced: false,
-        config,
-        reasonCodes: ['compression_context_utilization_unknown', ...evidence],
-      });
+      return Object.freeze({ mode: 'none', forced: false, config, reasonCodes: ['compression_context_utilization_unknown', ...evidence] });
     }
     const u = Number(utilization);
     let mode = 'none';
     let forced = false;
-    if (u >= config.forceThreshold) {
-      mode = 'heavy';
-      forced = true;
-    } else if (u >= config.heavyThreshold) mode = 'heavy';
+    if (u >= config.forceThreshold) { mode = 'heavy'; forced = true; }
+    else if (u >= config.heavyThreshold) mode = 'heavy';
     else if (u >= config.lightThreshold) mode = 'light';
     else if (u >= config.toolPruneThreshold) mode = 'tool_prune';
     return Object.freeze({
-      mode,
-      forced,
-      config,
+      mode, forced, config,
       reasonCodes: [
         `compression_mode=${mode}`,
         `context_utilization_band=${u.toFixed(2)}`,
