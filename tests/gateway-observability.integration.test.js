@@ -85,3 +85,49 @@ test('integration: SSE request produces sanitized decision event with latency an
     'backend.internal',
   ]) assert.equal(serialized.includes(forbidden), false, `telemetry leaked ${forbidden}`);
 });
+
+test('integration: high-utilization OpenAI request is compressed before downstream handler sees it', async () => {
+  const emitted = [];
+  const telemetry = new TelemetryCollector({ sink: (payload) => emitted.push(payload) });
+  const observer = new GatewayObserver({ telemetry });
+  const old = 'redundant historical context '.repeat(1200);
+  const req = {
+    headers: {
+      'user-agent': 'codex-cli/1.0',
+      'x-session-id': 'compression-session-private',
+      'x-context-window': '1000',
+    },
+    body: {
+      model: 'dify',
+      messages: [
+        { role: 'system', content: 'SYSTEM-CORE-MUST-STAY' },
+        { role: 'user', content: `old request ${old}` },
+        { role: 'assistant', content: `old answer ${old}` },
+        { role: 'user', content: 'CURRENT-REQUEST-MUST-STAY' },
+      ],
+      tools: [],
+    },
+  };
+  const res = new MockResponse();
+  const observed = observer.observe(req, res, {
+    traceId: 'trace-compression-integration',
+    providerId: 'dify',
+    backendId: 'dify-test-backend',
+  });
+
+  assert.equal(observed.decision.compression, 'heavy');
+  assert.equal(observed.compressionResult.mode, 'heavy');
+  assert.ok(observed.compressionResult.beforeTokens > observed.compressionResult.afterTokens);
+  assert.ok(req.body.messages.some((m) => m.role === 'system' && m.content === 'SYSTEM-CORE-MUST-STAY'));
+  assert.ok(req.body.messages.some((m) => m.role === 'user' && m.content === 'CURRENT-REQUEST-MUST-STAY'));
+  assert.equal(req.body.messages.some((m) => String(m.content).includes('old request redundant historical context')), false);
+
+  res.json({ choices: [{ message: { role: 'assistant', content: 'ok' } }], usage: { prompt_tokens: 50, completion_tokens: 1 } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(emitted.length, 1);
+  assert.equal(emitted[0].telemetry.compressionMode, 'heavy');
+  assert.ok(emitted[0].telemetry.compressionSavedTokens > 0);
+  const serialized = JSON.stringify(emitted[0]);
+  assert.equal(serialized.includes('compression-session-private'), false);
+  assert.equal(serialized.includes('redundant historical context'), false);
+});
