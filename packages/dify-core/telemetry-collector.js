@@ -2,6 +2,8 @@ import { createGatewayDecisionEvent } from './decision-event.js';
 
 export function createTelemetryRecord(canonicalRequest, decision, result) {
   const compression = result?.compressionResult;
+  const reconciliation = result?.backendReconciliation;
+  const checkpoint = result?.checkpointRecommendation;
   return Object.freeze({
     traceId: canonicalRequest.traceId,
     clientType: canonicalRequest.clientType,
@@ -21,8 +23,32 @@ export function createTelemetryRecord(canonicalRequest, decision, result) {
     compressionBeforeTokens: compression?.beforeTokens ?? canonicalRequest.estimatedPromptTokens,
     compressionAfterTokens: compression?.afterTokens ?? canonicalRequest.estimatedPromptTokens,
     compressionSavedTokens: compression?.savedTokens ?? 0,
+    compressionBeforeUtilization: compression?.beforeUtilization ?? canonicalRequest.contextUtilization ?? null,
+    compressionAfterUtilization: compression?.afterUtilization ?? null,
+    compressionTargetUtilization: compression?.targetUtilization ?? null,
+    compressionPasses: compression?.compressionPasses ?? 0,
+    compressionTargetReached: compression?.targetReached ?? false,
+    compressionUnableToReachTarget: compression?.unableToReachTarget ?? false,
     compressionPreservedRecentTurns: compression?.preservedRecentTurns ?? null,
     compressionReasonCodes: Array.isArray(compression?.reasonCodes) ? [...compression.reasonCodes] : [],
+    gatewayEstimatedInputTokens: reconciliation?.gatewayEstimatedInputTokens ?? canonicalRequest.estimatedPromptTokens,
+    gatewayCompressedTokens: reconciliation?.gatewayCompressedTokens ?? compression?.afterTokens ?? canonicalRequest.estimatedPromptTokens,
+    backendPromptTokens: reconciliation?.backendPromptTokens ?? null,
+    backendCompletionTokens: reconciliation?.backendCompletionTokens ?? null,
+    contextAmplification: reconciliation?.contextAmplification ?? null,
+    backendContextUtilization: reconciliation?.backendContextUtilization ?? null,
+    checkpointRecommended: checkpoint?.recommended ?? false,
+    checkpointReason: Array.isArray(checkpoint?.reasonCodes) ? [...checkpoint.reasonCodes] : [],
+    compression_passes: compression?.compressionPasses ?? 0,
+    compression_target_reached: compression?.targetReached ?? false,
+    compression_unable_to_reach_target: compression?.unableToReachTarget ?? false,
+    gateway_estimated_input_tokens: reconciliation?.gatewayEstimatedInputTokens ?? canonicalRequest.estimatedPromptTokens,
+    gateway_compressed_tokens: reconciliation?.gatewayCompressedTokens ?? compression?.afterTokens ?? canonicalRequest.estimatedPromptTokens,
+    backend_prompt_tokens: reconciliation?.backendPromptTokens ?? null,
+    backend_completion_tokens: reconciliation?.backendCompletionTokens ?? null,
+    context_amplification: reconciliation?.contextAmplification ?? null,
+    checkpoint_recommended: checkpoint?.recommended ?? false,
+    checkpoint_reason: Array.isArray(checkpoint?.reasonCodes) ? [...checkpoint.reasonCodes] : [],
     latencyMs: result?.latencyMs ?? 0,
     firstTokenLatencyMs: result?.firstTokenLatencyMs ?? null,
     retryCount: result?.retryCount ?? 0,
