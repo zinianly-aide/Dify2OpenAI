@@ -26,4 +26,8 @@ export * from './offline-policy-analyzer.js';
 export * from './policy-candidate.js';
 export * from './historical-replay.js';
 export * from './policy-evaluator.js';
+export * from './policy-registry.js';
+export * from './canary-assignment.js';
+export * from './guardrail-monitor.js';
+export * from './policy-lifecycle.js';
 export * from './telemetry-collector.js';
