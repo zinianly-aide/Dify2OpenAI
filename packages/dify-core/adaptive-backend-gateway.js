@@ -14,9 +14,24 @@ export class BackendAffinityStore {
   clear(sessionId, providerId = '', appId = '') { this.map.delete(this.key(sessionId, providerId, appId)); }
 }
 
-function toolReplayMessages(ledger, requests = []) {
+function statefulDeltaMessages(messages = []) {
+  if (!Array.isArray(messages) || messages.length === 0) return [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === 'assistant') return messages.slice(i + 1);
+  }
+  const nonInstructions = messages.filter((message) => message?.role !== 'system' && message?.role !== 'developer');
+  return nonInstructions.length ? nonInstructions : messages;
+}
+
+function hasToolResult(messages = [], toolCallId) {
+  const id = String(toolCallId || '');
+  return messages.some((message) => message?.role === 'tool' && String(message?.tool_call_id || '') === id);
+}
+
+function toolReplayMessages(ledger, requests = [], existingMessages = []) {
   const out = [];
   for (const input of requests) {
+    if (hasToolResult(existingMessages, input.toolCallId)) continue;
     const entry = ledger?.get?.(input);
     if (entry?.status === 'completed' || entry?.status === 'result_forwarded') {
       out.push({ role: 'tool', tool_call_id: input.toolCallId, content: String(entry.result ?? '') });
@@ -45,6 +60,10 @@ export class AdaptiveBackendGateway {
     if (!sessionId) throw new Error('GATEWAY_SESSION_REQUIRED');
     const providerId = String(input.providerId || 'gateway');
     const appId = String(input.appId || 'default');
+    const requestMessages = Array.isArray(input.messages) ? input.messages : [];
+    const canonicalMessages = Array.isArray(input.canonicalMessages) && input.canonicalMessages.length
+      ? input.canonicalMessages
+      : requestMessages;
     const currentBackendId = input.currentBackendId || this.affinityStore.get(sessionId, providerId, appId) || null;
     const routing = this.router.decide({ ...input, currentBackendId });
     if (!routing.backendId) {
@@ -69,7 +88,7 @@ export class AdaptiveBackendGateway {
 
       if (migrationRequired) {
         checkpoint = this.checkpointManager?.store?.latest?.(sessionId, sourceBackendId, providerId, appId) || null;
-        if (!checkpoint && this.checkpointManager && Array.isArray(input.messages) && input.messages.length) {
+        if (!checkpoint && this.checkpointManager && canonicalMessages.length) {
           const sourceRemote = this.conversationStore.get(sessionId, providerId, appId, sourceBackendId);
           if (sourceRemote) {
             const created = this.checkpointManager.create({
@@ -79,8 +98,8 @@ export class AdaptiveBackendGateway {
               appId,
               sourceGeneration: sourceRemote.generation,
               contextVersion: (sourceRemote.contextVersion || sourceRemote.generation || 1) + 1,
-              messages: input.messages,
-              compressedMessages: input.messages,
+              messages: canonicalMessages,
+              compressedMessages: requestMessages,
               system: input.system,
               tools: input.tools || [],
               reasonCodes: routing.reasonCodes,
@@ -96,7 +115,7 @@ export class AdaptiveBackendGateway {
           appId,
           targetCapabilities: backend.capabilities,
           checkpoint,
-          canonicalContextAvailable: Array.isArray(input.messages) && input.messages.length > 0,
+          canonicalContextAvailable: canonicalMessages.length > 0,
         });
         if (migration.blocked) {
           const error = new Error('MIGRATION_BLOCKED_NO_PORTABLE_CONTEXT');
@@ -110,11 +129,14 @@ export class AdaptiveBackendGateway {
       const targetRemote = this.conversationStore.get(sessionId, providerId, appId, backendId);
       let targetGeneration = null;
       let conversationId = '';
-      let messages = Array.isArray(input.messages) ? input.messages : [];
+      let messages = backend.capabilities.contextMode === BackendContextMode.STATELESS
+        ? canonicalMessages
+        : requestMessages;
 
       if (backend.capabilities.contextMode === BackendContextMode.STATEFUL) {
         if (!migrationRequired && targetRemote?.conversationId) {
           conversationId = targetRemote.conversationId;
+          messages = statefulDeltaMessages(requestMessages);
         } else if (migrationRequired) {
           assertNoCrossBackendConversationReuse({ sourceBackendId, targetBackendId: backendId, conversationId: '' });
           targetGeneration = this.conversationStore.createNextGeneration({
@@ -127,10 +149,11 @@ export class AdaptiveBackendGateway {
           });
           conversationId = '';
           if (checkpoint) messages = this.migrationPlanner.bootstrapMessages({ checkpoint, builder: this.checkpointManager.builder });
+          else messages = canonicalMessages;
         }
       }
 
-      const replayMessages = toolReplayMessages(this.toolLedger, input.completedToolInputs || []);
+      const replayMessages = toolReplayMessages(this.toolLedger, input.completedToolInputs || [], messages);
       if (replayMessages.length) messages = [...messages, ...replayMessages];
 
       attempted.push(backendId);
