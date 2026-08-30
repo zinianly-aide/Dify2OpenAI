@@ -5,9 +5,11 @@ const port = Number(process.env.FAKE_DIFY_NATIVE_PORT || 39125);
 const output = process.env.FAKE_DIFY_NATIVE_OUTPUT || '/tmp/fake-dify-native-requests.json';
 const uploadOutput = process.env.FAKE_DIFY_NATIVE_UPLOAD_OUTPUT || '/tmp/fake-dify-native-uploads.json';
 const imageE2E = process.env.FAKE_DIFY_NATIVE_IMAGE_E2E === '1';
+const rotationE2E = process.env.FAKE_DIFY_NATIVE_ROTATION_E2E === '1';
 const imagePath = process.env.FAKE_DIFY_NATIVE_IMAGE_PATH || '/tmp/dsh-native-read-image.png';
 const requests = [];
 const uploads = [];
+let rotationBootstrapConversationId = '';
 
 function persist() {
   fs.writeFileSync(output, JSON.stringify(requests, null, 2));
@@ -61,10 +63,26 @@ function imageToolCall(query) {
   };
 }
 
+function bashToolCall(id, marker) {
+  return {
+    id,
+    name: 'bash',
+    arguments: JSON.stringify({ command: `printf ${marker}` }),
+  };
+}
+
 function fileIds(body) {
   return Array.isArray(body?.files)
     ? body.files.map((file) => String(file?.upload_file_id || file?.url || '')).filter(Boolean)
     : [];
+}
+
+function usageFor(record) {
+  if (!rotationE2E) return { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 };
+  if (record.rotationStage === 'SOURCE_BOOTSTRAP') return { prompt_tokens: 90000, completion_tokens: 100, total_tokens: 90100 };
+  if (record.rotationStage === 'ROTATE_BOOTSTRAP') return { prompt_tokens: 30000, completion_tokens: 100, total_tokens: 30100 };
+  if (record.rotationStage === 'TARGET_CONTINUE') return { prompt_tokens: 32000, completion_tokens: 100, total_tokens: 32100 };
+  return { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 };
 }
 
 const server = http.createServer(async (req, res) => {
@@ -107,7 +125,20 @@ const server = http.createServer(async (req, res) => {
 
   const authorizationPresent = /^Bearer\s+\S+$/i.test(String(req.headers.authorization || ''));
   const index = requests.length;
-  const conversationId = body.conversation_id || `native-conv-${String(index + 1).padStart(3, '0')}`;
+  const isSourceBootstrap = rotationE2E && !body.conversation_id && /External tools available/.test(body.query || '') && !/tool_result tool_call_id=/.test(body.query || '') && !rotationBootstrapConversationId;
+  const isRotateBootstrap = rotationE2E && !body.conversation_id && /External tools available/.test(body.query || '') && /tool_result tool_call_id=call_native_001/.test(body.query || '');
+  if (isRotateBootstrap && !rotationBootstrapConversationId) rotationBootstrapConversationId = 'native-rotation-conv-002';
+  const isTargetContinue = rotationE2E && rotationBootstrapConversationId && body.conversation_id === rotationBootstrapConversationId && /tool_result tool_call_id=call_native_002/.test(body.query || '');
+  const conversationId = isRotateBootstrap
+    ? rotationBootstrapConversationId
+    : (body.conversation_id || `native-conv-${String(index + 1).padStart(3, '0')}`);
+  const rotationStage = isSourceBootstrap
+    ? 'SOURCE_BOOTSTRAP'
+    : isRotateBootstrap
+      ? 'ROTATE_BOOTSTRAP'
+      : isTargetContinue
+        ? 'TARGET_CONTINUE'
+        : 'AUXILIARY';
   const record = {
     method: req.method,
     url: req.url,
@@ -121,6 +152,7 @@ const server = http.createServer(async (req, res) => {
     toolResultPayloadLength: toolResultPayloadLength(body.query),
     fileCount: Array.isArray(body.files) ? body.files.length : 0,
     fileIds: fileIds(body),
+    rotationStage,
   };
   requests.push(record);
   persist();
@@ -134,6 +166,7 @@ const server = http.createServer(async (req, res) => {
     hasToolResult: record.hasToolResult,
     toolResultPayloadLength: record.toolResultPayloadLength,
     fileCount: record.fileCount,
+    rotationStage,
     queryLength: String(body.query || '').length,
   }));
 
@@ -142,7 +175,28 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('cache-control', 'no-cache');
   const createdAt = Math.floor(Date.now() / 1000);
 
-  if (!record.hasToolResult && record.hasToolSchema) {
+  if (rotationE2E && rotationStage === 'SOURCE_BOOTSTRAP') {
+    sendEvent(res, {
+      event: 'message',
+      answer: JSON.stringify({ tool_calls: [bashToolCall('call_native_001', 'DSH_ROTATION_SOURCE_TOOL_OK')] }),
+      conversation_id: conversationId,
+      created_at: createdAt,
+    });
+  } else if (rotationE2E && rotationStage === 'ROTATE_BOOTSTRAP') {
+    sendEvent(res, {
+      event: 'message',
+      answer: JSON.stringify({ tool_calls: [bashToolCall('call_native_002', 'DSH_ROTATION_TARGET_TOOL_OK')] }),
+      conversation_id: conversationId,
+      created_at: createdAt,
+    });
+  } else if (rotationE2E && rotationStage === 'TARGET_CONTINUE') {
+    sendEvent(res, {
+      event: 'message',
+      answer: 'DSH_NATIVE_ROTATION_OK',
+      conversation_id: conversationId,
+      created_at: createdAt,
+    });
+  } else if (!record.hasToolResult && record.hasToolSchema) {
     const imageCall = imageE2E ? imageToolCall(body.query) : null;
     if (imageE2E && !imageCall) {
       sendEvent(res, {
@@ -156,11 +210,7 @@ const server = http.createServer(async (req, res) => {
       sendEvent(res, {
         event: 'message',
         answer: JSON.stringify({
-          tool_calls: [imageCall || {
-            id: 'call_native_001',
-            name: 'bash',
-            arguments: JSON.stringify({ command: 'printf DSH_NATIVE_TOOL_OK' }),
-          }],
+          tool_calls: [imageCall || bashToolCall('call_native_001', 'DSH_NATIVE_TOOL_OK')],
         }),
         conversation_id: conversationId,
         created_at: createdAt,
@@ -169,19 +219,18 @@ const server = http.createServer(async (req, res) => {
   } else {
     sendEvent(res, {
       event: 'message',
-      answer: 'DSH_NATIVE_PROVIDER_OK',
+      answer: rotationE2E ? 'DSH_NATIVE_ROTATION_OK' : 'DSH_NATIVE_PROVIDER_OK',
       conversation_id: conversationId,
       created_at: createdAt,
     });
   }
 
+  const usage = usageFor(record);
   sendEvent(res, {
     event: 'message_end',
     conversation_id: conversationId,
     created_at: createdAt,
-    metadata: {
-      usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
-    },
+    metadata: { usage },
   });
   res.end();
 });
