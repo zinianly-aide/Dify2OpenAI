@@ -4,8 +4,10 @@ import { ConversationState, resolveConversationState } from '../lib/conversation
 import { conversationStore, toolSchemaRegistry, toolExecutionLedger } from '../lib/runtime.js';
 import { sha256 } from '../lib/canonical.js';
 import { currentImageAttachments, resolveDifyFiles } from '../lib/attachments.js';
+import { DifyUsageExtractor } from '../lib/gateway/backend-context.js';
 
 const PROVIDER = 'dify';
+const difyUsageExtractor = new DifyUsageExtractor();
 const textOf = (m) => typeof m?.content === 'string' ? m.content : Array.isArray(m?.content) ? m.content.filter(x=>x?.type==='text').map(x=>x.text||'').join('\n') : '';
 const dshIdOf = (req) => String(req.headers['x-dsh-conversation-id'] || req.headers['x-session-id'] || req.body?.user || 'default');
 const appIdOf = (req, config) => String(req.headers['x-dify-app-id'] || req.body?.dify_app_id || sha256(config.API_KEY || config.DIFY_API_URL).slice(0,16));
@@ -35,7 +37,16 @@ async function callDify(config,body,attachments=[]){
  const resp=await fetch(`${config.DIFY_API_URL}/chat-messages`,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${config.API_KEY}`},body:JSON.stringify(payload)});
  const raw=await resp.text();let json=null;try{json=JSON.parse(raw)}catch{}return{ok:resp.ok,status:resp.status,raw,json};
 }
-function openAIResponse(data,answer,toolCalls,traceId){return{id:`chatcmpl-${traceId}`,object:'chat.completion',created:Math.floor(Date.now()/1000),model:data.model||'dify',choices:[{index:0,message:{role:'assistant',content:toolCalls.length?null:answer,...(toolCalls.length?{tool_calls:toolCalls}:{})},finish_reason:toolCalls.length?'tool_calls':'stop'}],usage:{prompt_tokens:0,completion_tokens:0,total_tokens:0}};}
+function openAIResponse(data,answer,toolCalls,traceId,backendUsage){
+ const usage = backendUsage?.backendPromptTokens === undefined && backendUsage?.backendCompletionTokens === undefined
+   ? undefined
+   : {
+       prompt_tokens: backendUsage?.backendPromptTokens ?? 0,
+       completion_tokens: backendUsage?.backendCompletionTokens ?? 0,
+       total_tokens: (backendUsage?.backendPromptTokens ?? 0) + (backendUsage?.backendCompletionTokens ?? 0),
+     };
+ return{id:`chatcmpl-${traceId}`,object:'chat.completion',created:Math.floor(Date.now()/1000),model:data.model||'dify',choices:[{index:0,message:{role:'assistant',content:toolCalls.length?null:answer,...(toolCalls.length?{tool_calls:toolCalls}:{})},finish_reason:toolCalls.length?'tool_calls':'stop'}],...(usage?{usage}:{})};
+}
 function send(res,data,payload){if(!data.stream)return res.json(payload);res.setHeader('Content-Type','text/event-stream');const msg=payload.choices[0].message;res.write(`data: ${JSON.stringify({id:payload.id,object:'chat.completion.chunk',created:payload.created,model:payload.model,choices:[{index:0,delta:{role:'assistant',...(msg.content?{content:msg.content}:{}),...(msg.tool_calls?{tool_calls:msg.tool_calls.map((x,index)=>({index,...x}))}:{})},finish_reason:payload.choices[0].finish_reason}]})}\n\n`);res.end('data: [DONE]\n\n');}
 
 async function handleRequest(req,res,config){
@@ -60,10 +71,12 @@ async function handleRequest(req,res,config){
    catch(error){locals.gatewayErrorType=String(error?.code||'dify_attachment_error');return res.status(error?.status||502).json({error:{message:error?.message||'Dify attachment processing failed',type:'dify_attachment_error',trace_id:traceId}});}
  }
  if(!result.ok){responseLocals(res).gatewayErrorType='dify_error';return res.status(result.status||502).json({error:{message:result.json?.message||result.raw||'Dify request failed',type:'dify_error',trace_id:traceId}});}
+ const backendUsage=difyUsageExtractor.extract(result.json)||undefined;
+ if(backendUsage)responseLocals(res).gatewayBackendUsage=backendUsage;
  const difyConversationId=result.json?.conversation_id||remote?.conversationId||'';if(difyConversationId)remote=conversationStore.set(dshConversationId,providerId,difyAppId,{conversationId:difyConversationId,valid:true,updatedAt:Date.now(),toolSchemaHash:schema.toolSchemaHash});
  let answer=String(result.json?.answer||''),toolCalls=parseToolCalls(answer);const emitted=[],replay=[];
  for(const c of toolCalls){const args=c.function?.arguments||'{}',entry=toolExecutionLedger.begin({providerId,conversationId:dshConversationId,toolCallId:c.id,arguments:args});trace({traceId,dshConversationId,providerId,difyConversationId,conversationState:resolved.state,toolSchemaHash:schema.toolSchemaHash,toolCallId:c.id,argumentsHash:entry.argumentsHash,toolExecutionStatus:entry.status,contextStrategy:resolved.contextStrategy});if(entry.replay)replay.push({call:c,result:entry.result});else if(!entry.duplicate)emitted.push(c);}
- if(replay.length&&!emitted.length){const replayQuery=replay.map(x=>`tool_result tool_call_id=${x.call.id}: ${x.result}`).join('\n');const continued=await callDify(config,{...makeBody(difyConversationId,'TOOL_CONTINUE'),query:replayQuery},[]);if(continued.ok){answer=String(continued.json?.answer||'');toolCalls=parseToolCalls(answer);for(const c of toolCalls){const e=toolExecutionLedger.begin({providerId,conversationId:dshConversationId,toolCallId:c.id,arguments:c.function?.arguments||'{}'});if(!e.duplicate)emitted.push(c);}}}
- send(res,data,openAIResponse(data,answer,emitted,traceId));
+ if(replay.length&&!emitted.length){const replayQuery=replay.map(x=>`tool_result tool_call_id=${x.call.id}: ${x.result}`).join('\n');const continued=await callDify(config,{...makeBody(difyConversationId,'TOOL_CONTINUE'),query:replayQuery},[]);if(continued.ok){const replayUsage=difyUsageExtractor.extract(continued.json);if(replayUsage)responseLocals(res).gatewayBackendUsage=replayUsage;answer=String(continued.json?.answer||'');toolCalls=parseToolCalls(answer);for(const c of toolCalls){const e=toolExecutionLedger.begin({providerId,conversationId:dshConversationId,toolCallId:c.id,arguments:c.function?.arguments||'{}'});if(!e.duplicate)emitted.push(c);}}}
+ send(res,data,openAIResponse(data,answer,emitted,traceId,responseLocals(res).gatewayBackendUsage));
 }
 export default{handleRequest};
