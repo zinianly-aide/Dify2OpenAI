@@ -1,0 +1,168 @@
+name: DSH Native Conversation Rotation E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  dsh-native-rotation-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DSH_HOME: /tmp/dsh-native-rotation-home
+      DSH_PERMISSION_MODE: danger-full-access
+      DIFY_PROVIDER_ID: dify
+      DIFY_APP_ID: default
+      DIFY_MODEL_NAME: Dify Native Rotation E2E
+      DIFY_API_URL: http://127.0.0.1:39126
+      DIFY_API_KEY: test-key
+      DIFY_TIMEOUT: '120000'
+      DIFY_CONTEXT_WINDOW: '32768'
+      DIFY_TELEMETRY_STDOUT: '1'
+      FAKE_DIFY_NATIVE_PORT: '39126'
+      FAKE_DIFY_NATIVE_OUTPUT: /tmp/fake-dify-native-rotation-requests.json
+      FAKE_DIFY_NATIVE_UPLOAD_OUTPUT: /tmp/fake-dify-native-rotation-uploads.json
+      FAKE_DIFY_NATIVE_ROTATION_E2E: '1'
+      CI: 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install pinned DSH and pnpm
+        run: npm install -g pnpm@10 @deepseek-ai/dsh@0.1.0-rc.7
+
+      - name: Install native provider development dependencies
+        shell: bash
+        run: |
+          cd packages/dsh-dify-provider
+          pnpm install --no-frozen-lockfile
+
+      - name: Initialize and install native provider
+        shell: bash
+        run: |
+          dsh --profile headless --dump-config > /tmp/dsh-native-rotation-base-config.txt
+          timeout 180s dsh plugin --profile headless add "$GITHUB_WORKSPACE/packages/dsh-dify-provider" --reporter=append-only
+          dsh plugin --profile headless why dsh-dify-provider --reporter=append-only
+
+      - name: Select native Dify provider
+        shell: bash
+        run: |
+          mkdir -p "$DSH_HOME"
+          cat > "$DSH_HOME/settings.yaml" <<'YAML'
+          agent-default-model:
+            provider: dify
+            model: default
+          YAML
+          dsh --profile headless --dump-config > /tmp/dsh-native-rotation-config.txt
+          grep -q "dsh-dify-provider" /tmp/dsh-native-rotation-config.txt
+
+      - name: Start rotation Fake Dify
+        shell: bash
+        run: |
+          node scripts/fake-dify-native-provider.mjs > /tmp/fake-dify-native-rotation.log 2>&1 &
+          echo $! > /tmp/fake-dify-native-rotation.pid
+          for i in $(seq 1 30); do
+            if grep -q "FAKE_DIFY_NATIVE_READY" /tmp/fake-dify-native-rotation.log; then exit 0; fi
+            sleep 1
+          done
+          cat /tmp/fake-dify-native-rotation.log || true
+          exit 1
+
+      - name: Invoke real DSH through source and target generations
+        shell: bash
+        run: |
+          set +e
+          output=$(timeout 120s dsh --profile headless "Use the requested tools when the provider asks, then return the final provider response." 2>&1)
+          code=$?
+          set -e
+          printf '%s\n' "$output" | tee /tmp/dsh-native-rotation-output.log
+          if [ "$code" -ne 0 ]; then
+            cat /tmp/fake-dify-native-rotation.log || true
+            exit "$code"
+          fi
+          echo "$output" | grep -q "DSH_NATIVE_ROTATION_OK"
+
+      - name: Verify two-phase generation rotation and continuation
+        shell: bash
+        run: |
+          test -s "$FAKE_DIFY_NATIVE_OUTPUT"
+          node - <<'NODE'
+          const fs = require('fs');
+          const requests = JSON.parse(fs.readFileSync(process.env.FAKE_DIFY_NATIVE_OUTPUT, 'utf8'));
+          const source = requests.find((r) => r.rotationStage === 'SOURCE_BOOTSTRAP');
+          const rotate = requests.find((r) => r.rotationStage === 'ROTATE_BOOTSTRAP');
+          const targetContinue = requests.find((r) => r.rotationStage === 'TARGET_CONTINUE');
+          if (!source) throw new Error('missing generation 1 source bootstrap');
+          if (!rotate) throw new Error('missing generation 2 rotation bootstrap');
+          if (!targetContinue) throw new Error('missing generation 2 continuation after rotation');
+          if ((source.body.conversation_id || '') !== '') throw new Error('source generation must bootstrap with empty conversation_id');
+          if ((rotate.body.conversation_id || '') !== '') throw new Error('target generation must bootstrap with empty conversation_id');
+          if (!rotate.assignedConversationId) throw new Error('target generation did not receive a Dify conversation id');
+          if (rotate.assignedConversationId === source.assignedConversationId) throw new Error('backend conversation did not rotate');
+          if (targetContinue.body.conversation_id !== rotate.assignedConversationId) {
+            throw new Error(`next round did not reuse target generation conversation ${rotate.assignedConversationId}`);
+          }
+          if (source.sessionHashUser !== rotate.sessionHashUser || rotate.sessionHashUser !== targetContinue.sessionHashUser) {
+            throw new Error('Gateway Session identity changed across generation rotation');
+          }
+          if (!rotate.hasToolSchema) throw new Error('rotation bootstrap did not force tool schema into the new backend conversation');
+          if (!/call_native_001/.test(rotate.body.query || '')) throw new Error('rotation bootstrap lost completed source-generation tool result');
+          if (!/call_native_002/.test(targetContinue.body.query || '')) throw new Error('target-generation continuation lost tool correlation');
+          console.log(JSON.stringify({
+            result: 'PASS',
+            gatewaySessionStable: true,
+            sourceGeneration: 1,
+            targetGeneration: 2,
+            sourceConversationIdHashChanged: true,
+            sourceConversationId: '***',
+            targetConversationId: '***',
+            rotationBootstrapConversationIdIn: rotate.body.conversation_id || '',
+            targetContinuationReusedNewConversation: true,
+            toolSchemaForcedForNewConversation: true,
+          }, null, 2));
+          NODE
+
+      - name: Verify native rotation telemetry and backend context reduction
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const output = fs.readFileSync('/tmp/dsh-native-rotation-output.log', 'utf8');
+          const payloads = [];
+          for (const line of output.split(/\r?\n/)) {
+            const start = line.indexOf('{');
+            if (start < 0) continue;
+            try {
+              const parsed = JSON.parse(line.slice(start));
+              if (parsed.component === 'gateway-decision' && parsed.source === 'dsh-dify-provider') payloads.push(parsed);
+            } catch {}
+          }
+          const rotated = payloads.find((x) => x.telemetry?.rotation_success === true);
+          if (!rotated) throw new Error('missing successful native rotation telemetry');
+          if (rotated.telemetry.source_generation !== 1) throw new Error(`unexpected source generation ${rotated.telemetry.source_generation}`);
+          if (rotated.telemetry.target_generation !== 2) throw new Error(`unexpected target generation ${rotated.telemetry.target_generation}`);
+          if (!rotated.telemetry.old_conversation_id_hash || !rotated.telemetry.new_conversation_id_hash) throw new Error('missing hashed conversation ids');
+          if (rotated.telemetry.old_conversation_id_hash === rotated.telemetry.new_conversation_id_hash) throw new Error('rotation conversation hashes did not change');
+          const reduction = rotated.telemetry.backend_context_reduction_pct;
+          if (!(reduction > 60 && reduction < 70)) throw new Error(`expected real backend context reduction near 66.7%, got ${reduction}`);
+          if (rotated.telemetry.backend_prompt_tokens !== 30000) throw new Error(`rotation backend usage was not actual target usage: ${rotated.telemetry.backend_prompt_tokens}`);
+          if (output.includes('test-key')) throw new Error('native rotation output leaked API key');
+          if (output.includes('native-rotation-conv-002')) throw new Error('native rotation telemetry leaked raw conversation id');
+          console.log('REAL_NATIVE_ROTATION_TELEMETRY ' + JSON.stringify(rotated.telemetry));
+          NODE
+
+      - name: Show native rotation logs
+        if: always()
+        shell: bash
+        run: |
+          echo '--- fake dify native rotation ---'
+          cat /tmp/fake-dify-native-rotation.log || true
+          echo '--- dsh native rotation output ---'
+          cat /tmp/dsh-native-rotation-output.log || true
