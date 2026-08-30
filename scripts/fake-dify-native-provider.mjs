@@ -18,6 +18,13 @@ function toolResultPayloadLength(query) {
   return match ? match[1].trim().length : 0;
 }
 
+function sanitizedHeaders(headers) {
+  const out = { ...headers };
+  if (out.authorization) out.authorization = '***';
+  if (out.cookie) out.cookie = '***';
+  return out;
+}
+
 const server = http.createServer(async (req, res) => {
   if (req.method !== 'POST' || req.url !== '/chat-messages') {
     res.statusCode = 404;
@@ -29,12 +36,14 @@ const server = http.createServer(async (req, res) => {
   let body = {};
   try { body = JSON.parse(raw); } catch {}
 
+  const authorizationPresent = /^Bearer\s+\S+$/i.test(String(req.headers.authorization || ''));
   const index = requests.length;
   const conversationId = body.conversation_id || `native-conv-${String(index + 1).padStart(3, '0')}`;
   const record = {
     method: req.method,
     url: req.url,
-    headers: req.headers,
+    headers: sanitizedHeaders(req.headers),
+    authorizationPresent,
     body,
     assignedConversationId: conversationId,
     sessionHashUser: body.user || '',
@@ -49,6 +58,7 @@ const server = http.createServer(async (req, res) => {
     conversationIdIn: body.conversation_id || '',
     conversationIdOut: conversationId,
     sessionHashUser: record.sessionHashUser,
+    authorizationPresent,
     hasToolSchema: record.hasToolSchema,
     hasToolResult: record.hasToolResult,
     toolResultPayloadLength: record.toolResultPayloadLength,
