@@ -2,6 +2,8 @@ import { LlmAdapter, LlmError, attributionHeaders } from '@deepseek-ai/dsh-llm';
 import {
   CanonicalRequest,
   CanonicalResponse,
+  CompressionPolicy,
+  ContextCompressor,
   ContextProfiler,
   ConversationState,
   DecisionEngine,
@@ -10,6 +12,7 @@ import {
   ToolExecutionLedger,
   ToolSchemaRegistry,
   backendIdFromUrl,
+  compressionConfigFromEnv,
   currentImageAttachments,
   isInvalidConversationError,
   resolveConversationState,
@@ -64,7 +67,7 @@ function ledgerInput(sessionId, providerId, appId, call) {
 }
 
 export class DifyAdapter extends LlmAdapter {
-  constructor({ providerId, apps, timeoutMs = 120000, resolveApiKey, readDshAttachment, logger }) {
+  constructor({ providerId, apps, timeoutMs = 120000, resolveApiKey, readDshAttachment, logger, compressionConfig }) {
     super();
     this.providerId = providerId;
     this.apps = new Map(apps.map((app) => [app.id, Object.freeze({ ...app })]));
@@ -76,7 +79,9 @@ export class DifyAdapter extends LlmAdapter {
     this.toolSchemas = new ToolSchemaRegistry();
     this.toolLedger = new ToolExecutionLedger();
     this.contextProfiler = new ContextProfiler();
-    this.decisionEngine = new DecisionEngine();
+    const compressionPolicy = new CompressionPolicy(compressionConfig || compressionConfigFromEnv());
+    this.contextCompressor = new ContextCompressor({ policy: compressionPolicy });
+    this.decisionEngine = new DecisionEngine({ compressionPolicy });
     this.telemetry = new TelemetryCollector({
       sink: (payload) => {
         const line = JSON.stringify({
@@ -218,21 +223,28 @@ export class DifyAdapter extends LlmAdapter {
     const app = this.apps.get(appId);
     if (!app) throw new LlmError(`Dify app "${appId}" is not configured`, 'UNKNOWN_MODEL');
 
-    const messages = options.messages || [];
-    const currentAttachments = currentImageAttachments(messages, 'dsh');
-
+    const originalMessages = options.messages || [];
+    const currentAttachments = currentImageAttachments(originalMessages, 'dsh');
     const canonicalRequest = CanonicalRequest.fromDsh(options, {
       traceId,
       providerId,
       backendId: backendIdFromUrl(app.baseURL),
       model: appId,
       contextWindow: app.contextWindow,
+      policyVersion: this.decisionEngine.policyVersion,
     });
     const contextProfile = this.contextProfiler.profile(canonicalRequest);
     const decision = this.decisionEngine.decide(canonicalRequest, contextProfile, {
       backendId: canonicalRequest.backendId,
       model: appId,
     });
+    const compression = this.contextCompressor.compress({
+      messages: originalMessages,
+      tools: options.tools || [],
+      system: options.system,
+      profile: contextProfile,
+    });
+    const messages = compression.messages;
     let telemetryRecorded = false;
     const recordDecision = (fields) => {
       if (telemetryRecorded) return;
@@ -240,6 +252,7 @@ export class DifyAdapter extends LlmAdapter {
       this.telemetry.collect(canonicalRequest, decision, new CanonicalResponse({
         latencyMs: Date.now() - startedAt,
         retryCount: 0,
+        compressionResult: compression.result,
         ...fields,
       }));
     };
@@ -264,6 +277,8 @@ export class DifyAdapter extends LlmAdapter {
           toolSchemaChanged: false,
           toolCallCount: 0,
           toolResultCount: 0,
+          compressionMode: compression.result.mode,
+          compressionSavedTokens: compression.result.savedTokens,
           retryCount: 0,
           latencyMs: Date.now() - startedAt,
           status: 'ok',
@@ -286,11 +301,11 @@ export class DifyAdapter extends LlmAdapter {
       }
 
       const tools = options.tools || [];
-      const toolResults = tailToolResults(messages);
+      const toolResults = tailToolResults(originalMessages);
       const schema = this.toolSchemas.resolve({ dshConversationId: sessionId, providerId, difyAppId: appId, tools });
-      const resultInputs = this.recordToolResults(sessionId, providerId, appId, messages);
+      const resultInputs = this.recordToolResults(sessionId, providerId, appId, originalMessages);
       let remote = this.conversations.get(sessionId, providerId, appId);
-      let resolved = resolveConversationState({ remoteState: remote, messages, toolResults });
+      let resolved = resolveConversationState({ remoteState: remote, messages: originalMessages, toolResults });
 
       let retryCount = 0;
       const request = async (conversationId, strategy) => this.collect(
@@ -315,7 +330,7 @@ export class DifyAdapter extends LlmAdapter {
         if (!(remote?.conversationId && isInvalidConversationError(error))) throw error;
         retryCount = 1;
         this.conversations.invalidate(sessionId, providerId, appId);
-        resolved = resolveConversationState({ remoteState: remote, messages, toolResults, remoteInvalid: true });
+        resolved = resolveConversationState({ remoteState: remote, messages: originalMessages, toolResults, remoteInvalid: true });
         emitTrace(this.logger, {
           traceId,
           dshSessionIdHash: sessionHash(sessionId),
@@ -328,6 +343,8 @@ export class DifyAdapter extends LlmAdapter {
           toolSchemaChanged: schema.changed,
           toolCallCount: 0,
           toolResultCount: toolResults.length,
+          compressionMode: compression.result.mode,
+          compressionSavedTokens: compression.result.savedTokens,
           retryCount,
           latencyMs: Date.now() - startedAt,
           status: 'recovering',
@@ -380,7 +397,7 @@ export class DifyAdapter extends LlmAdapter {
         calls = parseToolCalls(answer);
       }
 
-      const gap = messagesAfterOwnAssistant(messages, providerId, appId);
+      const gap = messagesAfterOwnAssistant(originalMessages, providerId, appId);
       const providerSwitch = gap.some((m) => m?.role === 'assistant' && m?.source?.kind === 'model'
         && (m.source.provider !== providerId || m.source.model !== appId));
       emitTrace(this.logger, {
@@ -395,6 +412,10 @@ export class DifyAdapter extends LlmAdapter {
         toolSchemaChanged: schema.changed,
         toolCallCount: emitted.length,
         toolResultCount: toolResults.length,
+        compressionMode: compression.result.mode,
+        compressionBeforeTokens: compression.result.beforeTokens,
+        compressionAfterTokens: compression.result.afterTokens,
+        compressionSavedTokens: compression.result.savedTokens,
         retryCount,
         latencyMs: Date.now() - startedAt,
         status: 'ok',
