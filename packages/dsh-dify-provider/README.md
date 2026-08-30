@@ -49,4 +49,14 @@ The API key is resolved from the configured credential reference (`DIFY_API_KEY`
 
 Provider switching does not delete mappings, so returning to the same Dify app resumes its previous downstream cursor.
 
-Current limitation: image attachment blocks are rejected with `UNSUPPORTED_CONTENT` instead of being silently dropped. Text, tools, tool-result continuation, Dify SSE, usage, cancellation signal propagation, timeout, and invalid-conversation recovery are implemented.
+## Images
+
+The provider advertises `text` and `image` input modalities. Image blocks on the current real user turn are normalized by `@zinianly-aide/dify-core` and mapped to Dify's `files` protocol:
+
+- HTTP/HTTPS image sources become `{ type: "image", transfer_method: "remote_url", url: "..." }`.
+- Base64 image sources are uploaded once for that DSH request to `POST /files/upload` using the same hashed Dify `user`; the returned id is sent as `{ type: "image", transfer_method: "local_file", upload_file_id: "..." }`.
+- Tool-result continuation and tool replay requests send no image files, so an image from the preceding user turn is not repeatedly uploaded or attached.
+
+The bridge accepts common DSH image-source shapes (`source.url`, `source.data`/`source.base64` plus `mediaType`/`mimeType`) and does not put image bytes, raw URLs, API keys, or raw session ids into decision telemetry.
+
+Text, images, tools, tool-result continuation, Dify SSE, usage, cancellation signal propagation, timeout, and invalid-conversation recovery are implemented.
