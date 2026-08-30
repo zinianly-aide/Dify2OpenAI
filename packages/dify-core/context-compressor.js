@@ -126,7 +126,7 @@ function summaryMessage(messages, maxChars) {
   const unique = [...new Set(fragments)].join('\n').slice(0, maxChars);
   if (!unique) return { message: null, categories: [] };
   return {
-    message: { role: 'system', content: `Compressed prior context (important references only):\n${unique}` },
+    message: { role: 'assistant', content: `Compressed prior context (important references only):\n${unique}` },
     categories: [...categories],
   };
 }
