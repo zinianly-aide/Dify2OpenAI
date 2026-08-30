@@ -6,7 +6,7 @@ import { ToolAttachmentBridge, mergeAttachments } from './tool-attachment-bridge
 export { DifyAdapter } from './native-adapter.js';
 
 export const name = 'llm-dify';
-export const inject = ['llm'];
+export const inject = ['llm', 'tools'];
 
 const appSchema = z.object({
   id: z.string().required(),
@@ -91,6 +91,20 @@ export function apply(ctx, config) {
   });
 
   ctx.on('tools/result', (exec, result) => {
+    const imageBlockCount = Array.isArray(result?.content)
+      ? result.content.filter((block) => block?.type === 'image').length
+      : 0;
+    if (ctx.logger?.info) {
+      ctx.logger.info(JSON.stringify({
+        component: 'dify-tool-attachment-bridge',
+        event: 'tools/result',
+        toolName: String(exec?.name || '').slice(0, 80),
+        hasCallId: Boolean(exec?.callId),
+        hasAgentId: Boolean(exec?.agent?.id),
+        isError: Boolean(result?.isError),
+        imageBlockCount,
+      }));
+    }
     try {
       toolAttachments.capture(exec, result);
     } catch (error) {
