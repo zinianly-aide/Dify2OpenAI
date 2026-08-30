@@ -116,3 +116,72 @@ test('attachments are only taken from the current user turn and not resent on to
     { role: 'user', source: { kind: 'tool', callId: 'call-1' }, content: [{ type: 'tool-result', toolCallId: 'call-1', content: [] }] },
   ], 'dsh').length, 0);
 });
+
+test('DSH durable image nested in tool-result is read through attachment store and uploaded once', async (t) => {
+  const opaqueAttachmentId = 'opaque-do-not-interpret-as-path';
+  const message = {
+    role: 'user',
+    source: { kind: 'tool', callId: 'call-read-image' },
+    content: [{
+      type: 'tool-result',
+      toolCallId: 'call-read-image',
+      content: [
+        { type: 'text', text: 'image loaded' },
+        {
+          type: 'image',
+          attachment: {
+            attachmentId: opaqueAttachmentId,
+            mediaType: 'image/png',
+            bytes: 5,
+            width: 1,
+            height: 1,
+            name: 'tiny.png',
+          },
+        },
+      ],
+    }],
+  };
+  const attachments = currentImageAttachments([message], 'dsh');
+  assert.equal(attachments.length, 1);
+  assert.equal(attachments[0].source.kind, 'dsh_attachment');
+  assert.equal(attachments[0].source.attachment.attachmentId, opaqueAttachmentId);
+
+  let readCount = 0;
+  let uploadCount = 0;
+  let seenBody = '';
+  const server = http.createServer(async (req, res) => {
+    if (req.method !== 'POST' || req.url !== '/v1/files/upload') {
+      res.statusCode = 404;
+      res.end('not found');
+      return;
+    }
+    uploadCount += 1;
+    for await (const chunk of req) seenBody += chunk.toString('latin1');
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ id: 'upload-dsh-tool-image-001' }));
+  });
+  t.after(() => close(server));
+  const address = await listen(server);
+
+  const files = await resolveDifyFiles({
+    baseURL: `http://127.0.0.1:${address.port}/v1`,
+    apiKey: 'redacted-test-key',
+    user: 'dsh-hashed-user',
+    attachments,
+    readDshAttachment: async (ref) => {
+      readCount += 1;
+      assert.equal(ref.attachmentId, opaqueAttachmentId);
+      return { ref, data: Uint8Array.from([104, 101, 108, 108, 111]) };
+    },
+  });
+
+  assert.equal(readCount, 1);
+  assert.equal(uploadCount, 1);
+  assert.match(seenBody, /dsh-hashed-user/);
+  assert.doesNotMatch(seenBody, new RegExp(opaqueAttachmentId));
+  assert.deepEqual(files, [{
+    type: 'image',
+    transfer_method: 'local_file',
+    upload_file_id: 'upload-dsh-tool-image-001',
+  }]);
+});
