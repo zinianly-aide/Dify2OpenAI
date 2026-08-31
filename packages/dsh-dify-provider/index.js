@@ -51,6 +51,12 @@ function normalizeApps(config) {
   });
 }
 
+function emitBridgeDiagnostic(ctx, event) {
+  const line = JSON.stringify({ component: 'dify-tool-attachment-bridge', ...event });
+  if (ctx.logger?.info) ctx.logger.info(line);
+  if (process.env.DIFY_TELEMETRY_STDOUT === '1') console.log(line);
+}
+
 export function apply(ctx, config) {
   const providerId = String(config.providerId || 'dify').trim();
   if (!providerId) throw new Error('dsh-dify-provider providerId must be non-empty');
@@ -91,33 +97,39 @@ export function apply(ctx, config) {
   });
 
   ctx.on('tools/result', (exec, result) => {
-    const imageBlockCount = Array.isArray(result?.content)
-      ? result.content.filter((block) => block?.type === 'image').length
-      : 0;
+    const blockTypes = Array.isArray(result?.content)
+      ? result.content.map((block) => String(block?.type || 'unknown').slice(0, 40))
+      : [];
+    const imageBlockCount = blockTypes.filter((type) => type === 'image').length;
     let captured = false;
     try {
       captured = toolAttachments.capture(exec, result);
     } catch (error) {
       if (ctx.logger?.warn) ctx.logger.warn(`dsh-dify-provider ignored malformed read_image attachment: ${String(error?.code || error?.name || 'invalid_attachment')}`);
     }
-    if (ctx.logger?.info) {
-      ctx.logger.info(JSON.stringify({
-        component: 'dify-tool-attachment-bridge',
-        event: 'tools/result',
-        toolName: String(exec?.name || '').slice(0, 80),
-        hasCallId: Boolean(exec?.callId),
-        isError: Boolean(result?.isError),
-        imageBlockCount,
-        captured,
-      }));
-    }
+    emitBridgeDiagnostic(ctx, {
+      event: 'tools/result',
+      toolName: String(exec?.name || '').slice(0, 80),
+      hasCallId: Boolean(exec?.callId),
+      isError: Boolean(result?.isError),
+      contentBlockTypes: blockTypes,
+      imageBlockCount,
+      captured,
+    });
   });
 
   const stream = adapter.stream.bind(adapter);
   adapter.stream = async function* streamWithToolOwnership(options) {
     for await (const chunk of stream(options)) {
       if (chunk?.type === 'block-end' && chunk?.block?.type === 'tool-call') {
-        toolAttachments.registerOwnership(options?.sessionId, chunk.block.id);
+        const registered = toolAttachments.registerOwnership(options?.sessionId, chunk.block.id);
+        emitBridgeDiagnostic(ctx, {
+          event: 'tool-call-ownership',
+          toolName: String(chunk.block.name || '').slice(0, 80),
+          hasCallId: Boolean(chunk.block.id),
+          hasSessionId: options?.sessionId !== undefined && options?.sessionId !== null,
+          registered,
+        });
       }
       yield chunk;
     }
@@ -127,6 +139,13 @@ export function apply(ctx, config) {
   adapter.collect = async (app, body, signal, attachments = []) => {
     const pending = toolAttachments.resolve(body?.user, body?.query);
     const merged = mergeAttachments(attachments, pending.attachments);
+    if (pending.callIds.length || pending.attachments.length) {
+      emitBridgeDiagnostic(ctx, {
+        event: 'continuation-resolve',
+        matchedToolCallCount: pending.callIds.length,
+        attachmentCount: pending.attachments.length,
+      });
+    }
     const response = await collect(app, body, signal, merged);
     if (pending.callIds.length) toolAttachments.consume(body?.user, pending.callIds);
     return response;
