@@ -1,0 +1,38 @@
+name: Knowledge Pattern Mining
+
+on:
+  push:
+    branches:
+      - feat/gateway-knowledge-plane
+    paths:
+      - 'packages/dify-core/knowledge-pattern.js'
+      - 'packages/dify-core/pattern-miner.js'
+      - 'packages/dify-core/pattern-store.js'
+      - 'packages/dify-core/knowledge-experience.js'
+      - 'packages/dify-core/experience-compiler.js'
+      - 'packages/dify-core/index.js'
+      - 'tests/knowledge-pattern-miner.test.js'
+      - 'tests/knowledge-plane-foundation.test.js'
+      - '.github/workflows/knowledge-pattern-mining.yml'
+  workflow_dispatch:
+
+jobs:
+  deterministic-pattern-mining:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Run Phase 1 foundation regression
+        run: node --test tests/knowledge-plane-foundation.test.js
+      - name: Run Phase 2 deterministic pattern tests
+        run: node --test tests/knowledge-pattern-miner.test.js
+      - name: Run related gateway regressions
+        run: |
+          node --test \
+            tests/offline-policy.test.js \
+            tests/backend-routing.test.js \
+            tests/tool-optimization.test.js \
+            tests/checkpoint-generation.test.js
