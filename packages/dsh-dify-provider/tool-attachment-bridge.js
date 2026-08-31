@@ -38,17 +38,37 @@ function canonicalImages(content) {
 export class ToolAttachmentBridge {
   constructor() {
     this.entries = new Map();
+    this.owners = new Map();
+    this.ambiguousCallIds = new Set();
+  }
+
+  registerOwnership(sessionId, callId) {
+    if (sessionId === undefined || sessionId === null || !callId) return false;
+    const id = String(callId);
+    const user = userKey(sessionId);
+    if (this.ambiguousCallIds.has(id)) return false;
+    const existing = this.owners.get(id);
+    if (existing && existing !== user) {
+      this.owners.delete(id);
+      this.ambiguousCallIds.add(id);
+      return false;
+    }
+    this.owners.set(id, user);
+    return true;
   }
 
   capture(exec, result) {
     if (String(exec?.name || '') !== 'read_image' || result?.isError) return false;
-    const sessionId = exec?.agent?.id;
     const callId = exec?.callId;
-    if (sessionId === undefined || sessionId === null || !callId) return false;
+    if (!callId) return false;
+    const id = String(callId);
+    if (this.ambiguousCallIds.has(id)) return false;
+    const user = this.owners.get(id);
+    if (!user) return false;
     const images = canonicalImages(result?.content);
     if (!images.length) return false;
     const unique = new Map(images.map((image) => [attachmentKey(image), image]));
-    this.entries.set(entryKey(userKey(sessionId), callId), Object.freeze([...unique.values()]));
+    this.entries.set(entryKey(user, id), Object.freeze([...unique.values()]));
     return true;
   }
 
@@ -72,13 +92,22 @@ export class ToolAttachmentBridge {
   }
 
   consume(user, callIds = []) {
-    for (const callId of callIds) this.entries.delete(entryKey(user, callId));
+    for (const callId of callIds) {
+      const id = String(callId);
+      this.entries.delete(entryKey(user, id));
+      if (this.owners.get(id) === String(user)) this.owners.delete(id);
+      this.ambiguousCallIds.delete(id);
+    }
   }
 
   clearSession(sessionId) {
-    const prefix = `${userKey(sessionId)}::`;
+    const user = userKey(sessionId);
+    const prefix = `${user}::`;
     for (const key of this.entries.keys()) {
       if (key.startsWith(prefix)) this.entries.delete(key);
+    }
+    for (const [callId, owner] of this.owners.entries()) {
+      if (owner === user) this.owners.delete(callId);
     }
   }
 }
