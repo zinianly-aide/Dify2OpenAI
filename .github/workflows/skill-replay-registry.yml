@@ -1,0 +1,31 @@
+name: Skill Replay Registry
+
+on:
+  push:
+    branches:
+      - feat/gateway-knowledge-plane
+    paths:
+      - 'packages/dify-core/skill-registry.js'
+      - 'packages/dify-core/skill-replay.js'
+      - 'packages/dify-core/skill-evaluator.js'
+      - 'packages/dify-core/index.js'
+      - 'tests/skill-replay-registry.test.js'
+      - 'tests/skill-candidate-proposal.test.js'
+      - '.github/workflows/skill-replay-registry.yml'
+  workflow_dispatch:
+
+jobs:
+  skill-replay-registry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Run Phase 4 candidate regression
+        run: node --test tests/skill-candidate-proposal.test.js
+      - name: Run Phase 5 replay and registry tests
+        run: node --test tests/skill-replay-registry.test.js
+      - name: Run Wiki retention regression
+        run: node --test tests/wiki-evolution.test.js
