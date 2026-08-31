@@ -47,3 +47,5 @@ export * from './skill-proposer.js';
 export * from './skill-registry.js';
 export * from './skill-replay.js';
 export * from './skill-evaluator.js';
+export * from './runtime-skill-selector.js';
+export * from './evolution-controller.js';
