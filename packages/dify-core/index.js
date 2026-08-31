@@ -41,3 +41,6 @@ export * from './evolution-log.js';
 export * from './pattern-impact-tracker.js';
 export * from './wiki-maintainer.js';
 export * from './gateway-wiki.js';
+export * from './skill-candidate.js';
+export * from './skill-candidate-selector.js';
+export * from './skill-proposer.js';
