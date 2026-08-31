@@ -86,14 +86,17 @@ test('policy and skill rollback append impact evidence and do not delete wiki kn
 
 test('scope promotion requires deterministic evidence', () => {
   const wiki = new WikiMaintainer();
-  const pattern = basePattern({ versionSpecific: true });
+  const miner = new PatternMiner();
+  const pattern = miner.mine([experience(1, { versionSpecific: true })])
+    .find((p) => p.semanticKey === 'checkpoint-reduces-backend-context');
   assert.equal(pattern.scope, KnowledgeScope.VERSION_SPECIFIC);
+  assert.equal(pattern.evidence.observationCount, 1);
   wiki.create(pattern);
   assert.throws(() => wiki.promoteScope(pattern.patternId, KnowledgeScope.BACKEND_SPECIFIC, {
     evidenceDelta: { observationCount: 0, backendDiversity: 0 },
   }), /SCOPE_PROMOTION_EVIDENCE_INSUFFICIENT/);
   const promoted = wiki.promoteScope(pattern.patternId, KnowledgeScope.BACKEND_SPECIFIC, {
-    evidenceDelta: { observationCount: 1, backendDiversity: 1 },
+    evidenceDelta: { observationCount: 2, successCount: 2, backendDiversity: 1 },
   });
   assert.equal(promoted.pattern.scope, KnowledgeScope.BACKEND_SPECIFIC);
 });
