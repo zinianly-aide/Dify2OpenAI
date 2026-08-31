@@ -37,3 +37,7 @@ export * from './gateway-knowledge-store.js';
 export * from './knowledge-pattern.js';
 export * from './pattern-miner.js';
 export * from './pattern-store.js';
+export * from './evolution-log.js';
+export * from './pattern-impact-tracker.js';
+export * from './wiki-maintainer.js';
+export * from './gateway-wiki.js';
