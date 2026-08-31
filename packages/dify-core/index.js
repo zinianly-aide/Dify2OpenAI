@@ -31,3 +31,6 @@ export * from './canary-assignment.js';
 export * from './guardrail-monitor.js';
 export * from './policy-lifecycle.js';
 export * from './telemetry-collector.js';
+export * from './knowledge-experience.js';
+export * from './experience-compiler.js';
+export * from './gateway-knowledge-store.js';
