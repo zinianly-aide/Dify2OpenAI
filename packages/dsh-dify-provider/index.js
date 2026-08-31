@@ -94,23 +94,34 @@ export function apply(ctx, config) {
     const imageBlockCount = Array.isArray(result?.content)
       ? result.content.filter((block) => block?.type === 'image').length
       : 0;
+    let captured = false;
+    try {
+      captured = toolAttachments.capture(exec, result);
+    } catch (error) {
+      if (ctx.logger?.warn) ctx.logger.warn(`dsh-dify-provider ignored malformed read_image attachment: ${String(error?.code || error?.name || 'invalid_attachment')}`);
+    }
     if (ctx.logger?.info) {
       ctx.logger.info(JSON.stringify({
         component: 'dify-tool-attachment-bridge',
         event: 'tools/result',
         toolName: String(exec?.name || '').slice(0, 80),
         hasCallId: Boolean(exec?.callId),
-        hasAgentId: Boolean(exec?.agent?.id),
         isError: Boolean(result?.isError),
         imageBlockCount,
+        captured,
       }));
     }
-    try {
-      toolAttachments.capture(exec, result);
-    } catch (error) {
-      if (ctx.logger?.warn) ctx.logger.warn(`dsh-dify-provider ignored malformed read_image attachment: ${String(error?.code || error?.name || 'invalid_attachment')}`);
-    }
   });
+
+  const stream = adapter.stream.bind(adapter);
+  adapter.stream = async function* streamWithToolOwnership(options) {
+    for await (const chunk of stream(options)) {
+      if (chunk?.type === 'block-end' && chunk?.block?.type === 'tool-call') {
+        toolAttachments.registerOwnership(options?.sessionId, chunk.block.id);
+      }
+      yield chunk;
+    }
+  };
 
   const collect = adapter.collect.bind(adapter);
   adapter.collect = async (app, body, signal, attachments = []) => {
