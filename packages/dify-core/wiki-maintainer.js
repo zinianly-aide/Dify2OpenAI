@@ -1,6 +1,6 @@
 import { canonicalJson, sha256 } from './canonical.js';
 import { KnowledgeScope } from './knowledge-experience.js';
-import { PatternStatus } from './knowledge-pattern.js';
+import { createKnowledgePattern, PatternStatus } from './knowledge-pattern.js';
 import { EvolutionLog } from './evolution-log.js';
 
 const CHANGE_TYPES = new Set(['CREATED', 'MERGED', 'STRENGTHENED', 'WEAKENED', 'CONTRADICTED', 'DEPRECATED', 'SUPERSEDED', 'SCOPE_PROMOTED']);
@@ -63,14 +63,15 @@ export class WikiMaintainer {
     if (!CHANGE_TYPES.has(changeType)) throw new Error(`INVALID_KNOWLEDGE_CHANGE:${changeType}`);
     const current = this.latest(patternId);
     if (!current) throw new Error(`PATTERN_NOT_FOUND:${patternId}`);
-    const nextPattern = {
+    const merged = {
       ...current.pattern,
       ...patch,
       evidence: mergeEvidence(current.pattern.evidence, evidenceDelta),
       sourceExperienceIds: [...new Set([...(current.pattern.sourceExperienceIds || []), ...(patch.sourceExperienceIds || [])])].sort(),
     };
-    if (changeType === 'CONTRADICTED') nextPattern.status = PatternStatus.CONTRADICTED;
-    if (changeType === 'DEPRECATED') nextPattern.status = PatternStatus.DEPRECATED;
+    if (changeType === 'CONTRADICTED') merged.status = PatternStatus.CONTRADICTED;
+    if (changeType === 'DEPRECATED') merged.status = PatternStatus.DEPRECATED;
+    const nextPattern = createKnowledgePattern(merged);
     return this.#append(patternId, current.patternVersion, changeType, nextPattern, evidenceDelta, timestamp);
   }
 
