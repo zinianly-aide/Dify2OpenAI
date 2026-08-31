@@ -44,3 +44,6 @@ export * from './gateway-wiki.js';
 export * from './skill-candidate.js';
 export * from './skill-candidate-selector.js';
 export * from './skill-proposer.js';
+export * from './skill-registry.js';
+export * from './skill-replay.js';
+export * from './skill-evaluator.js';
