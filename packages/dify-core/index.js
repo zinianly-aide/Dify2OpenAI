@@ -34,3 +34,6 @@ export * from './telemetry-collector.js';
 export * from './knowledge-experience.js';
 export * from './experience-compiler.js';
 export * from './gateway-knowledge-store.js';
+export * from './knowledge-pattern.js';
+export * from './pattern-miner.js';
+export * from './pattern-store.js';
