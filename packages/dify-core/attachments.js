@@ -92,23 +92,11 @@ function collectBlocks(blocks, mapper, out) {
   }
 }
 
-function currentTurnMessages(messages) {
-  const list = Array.isArray(messages) ? messages : [];
-  let start = 0;
-  for (let i = list.length - 1; i >= 0; i -= 1) {
-    const message = list[i];
-    if (message?.role === 'assistant' && message?.source?.kind === 'model') {
-      start = i + 1;
-      break;
-    }
-  }
-  return list.slice(start);
-}
-
 export function currentImageAttachments(messages = [], dialect = 'openai') {
   const mapper = dialect === 'dsh' ? imageAttachmentFromDshBlock : imageAttachmentFromOpenAIBlock;
   const out = [];
-  for (const message of currentTurnMessages(messages)) collectBlocks(message?.content, mapper, out);
+  const current = Array.isArray(messages) ? messages.at(-1) : null;
+  if (current) collectBlocks(current.content, mapper, out);
   return out;
 }
 

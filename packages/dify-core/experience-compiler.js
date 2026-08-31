@@ -19,10 +19,11 @@ function backendHash(event) {
 }
 
 export function classifyKnowledgeScope(event = {}) {
+  if (Object.values(KnowledgeScope).includes(event.knowledgeScope)) return event.knowledgeScope;
   if (event.versionSpecific === true || event.policyVersionSpecific === true) return KnowledgeScope.VERSION_SPECIFIC;
   if (event.modelSpecific === true) return KnowledgeScope.MODEL_SPECIFIC;
-  if (event.backendSpecific === true || backendType(event) !== 'unknown') return KnowledgeScope.BACKEND_SPECIFIC;
-  if (event.clientSpecific === true || text(event.clientType) !== 'unknown') return KnowledgeScope.CLIENT_SPECIFIC;
+  if (event.backendSpecific === true) return KnowledgeScope.BACKEND_SPECIFIC;
+  if (event.clientSpecific === true) return KnowledgeScope.CLIENT_SPECIFIC;
   return KnowledgeScope.GENERAL;
 }
 
@@ -36,35 +37,35 @@ export class ExperienceCompiler {
       backendType: backendType(event),
       backendIdHash: backendHash(event),
       modelFamily: modelFamily(event.model || event.modelFamily),
-      context: Object.freeze({
+      context: {
         utilization: num(event.contextUtilization, null),
         amplification: num(event.contextAmplification, null),
         compressionMode: text(event.compressionMode, 'none'),
         checkpoint: bool(event.checkpointCreated || event.checkpoint),
         rotation: bool(event.rotationOccurred || event.rotationStarted || event.rotationSuccess),
-      }),
-      tools: Object.freeze({
+      },
+      tools: {
         beforeCount: num(event.toolCountBefore),
         afterCount: num(event.toolCountAfter),
         schemaTokensSaved: num(event.toolSchemaTokensSaved),
         pruningMode: text(event.toolPruningMode || event.toolPruningConfidence, 'none'),
         recoveryTriggered: bool(event.toolRecoveryTriggered),
-      }),
-      routing: Object.freeze({
+      },
+      routing: {
         migration: bool(event.migrationOccurred || event.migrationStarted || event.routingMigrationRequired),
         fallback: bool(event.fallbackUsed || event.routingFallbackUsed),
         reasonCodes: codes(event.routingReasonCodes || event.reasonCodes),
-      }),
-      outcome: Object.freeze({
+      },
+      outcome: {
         success: bool(event.success),
         errorType: event.errorType ? text(event.errorType) : null,
         latencyBucket: bucket(event.latencyMs, [250, 1000, 5000, Infinity], ['LT_250MS', 'LT_1S', 'LT_5S', 'GE_5S']),
         tokenBucket: bucket(event.backendPromptTokens ?? event.estimatedInputTokens, [1000, 8000, 32000, Infinity], ['LT_1K', 'LT_8K', 'LT_32K', 'GE_32K']),
         costBucket: bucket(event.estimatedCost, [0.001, 0.01, 0.1, Infinity], ['LT_0_001', 'LT_0_01', 'LT_0_1', 'GE_0_1']),
-      }),
+      },
       policyVersion: text(event.policyVersion),
       scope,
-      source: Object.freeze({ type: text(sourceType), idHash: sourceId ? sha256(String(sourceId)).slice(0, 16) : null }),
+      source: { type: text(sourceType), idHash: sourceId ? sha256(String(sourceId)).slice(0, 16) : null },
     });
   }
 }

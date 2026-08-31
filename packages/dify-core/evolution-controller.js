@@ -57,7 +57,7 @@ export class EvolutionController {
   }
 
   manualSkillRollback({ registry, skillId, reasonCode = 'MANUAL_SKILL_ROLLBACK' }) {
-    const result = registry.transition(skillId, SkillStatus.ROLLED_BACK, { manual: true, reasonCode });
+    const result = registry.rollback(skillId, { reasonCode });
     this.#audit('MANUAL_SKILL_ROLLBACK', { skillIdHash: sha256(String(skillId)).slice(0, 16), reasonCode });
     return result;
   }

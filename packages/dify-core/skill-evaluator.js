@@ -1,5 +1,6 @@
 import { SkillScope } from './skill-candidate.js';
 import { SkillStatus } from './skill-registry.js';
+import { assertObservedSkillReplayResult } from './skill-replay.js';
 
 function delta(candidate, baseline) {
   if (!Number.isFinite(candidate) || !Number.isFinite(baseline)) return null;
@@ -18,6 +19,7 @@ export class SkillEvaluator {
   }
 
   evaluate(replay) {
+    assertObservedSkillReplayResult(replay);
     const environment = replay.cases.map((item) => ({
       taskId: item.taskId,
       client: item.client,

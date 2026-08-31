@@ -59,23 +59,40 @@ test('different sessions remain anonymous and do not affect identity', () => {
   assert.equal(JSON.stringify(b).includes('hash-b'), false);
 });
 
-test('scope classification is deterministic', () => {
-  assert.equal(compiler.compile(event()).scope, KnowledgeScope.BACKEND_SPECIFIC);
-  assert.equal(compiler.compile(event({ backendType: undefined, backendId: undefined, clientType: undefined, clientSpecific: true })).scope, KnowledgeScope.CLIENT_SPECIFIC);
+test('scope classification reflects semantic dependency rather than environment metadata', () => {
+  assert.equal(compiler.compile(event()).scope, KnowledgeScope.GENERAL);
+  assert.equal(compiler.compile(event({ backendSpecific: true })).scope, KnowledgeScope.BACKEND_SPECIFIC);
+  assert.equal(compiler.compile(event({ clientSpecific: true })).scope, KnowledgeScope.CLIENT_SPECIFIC);
+  assert.equal(compiler.compile(event({ modelSpecific: true })).scope, KnowledgeScope.MODEL_SPECIFIC);
   assert.equal(compiler.compile(event({ versionSpecific: true })).scope, KnowledgeScope.VERSION_SPECIFIC);
 });
 
-test('sensitive fields are removed from experience and snapshot', () => {
-  const experience = compiler.compile(event());
+test('strict whitelist removes sensitive fields and innocent-key payloads by value', () => {
+  const secrets = [
+    'raw prompt value',
+    'raw-session-123',
+    'raw-conversation-456',
+    'sk-live-secret-value',
+    '{"path":"/private/file"}',
+    'tool returned private data',
+    'attachment-binary-secret',
+  ];
+  const experience = compiler.compile(event({
+    message: secrets[0],
+    note: secrets[1],
+    payload: { conversation: secrets[2], api: secrets[3] },
+    metadata: { args: secrets[4], result: secrets[5], bytes: secrets[6] },
+  }));
   const store = new GatewayKnowledgeStore();
   store.appendExperience(experience);
   const snapshot = store.createSnapshot();
   assert.doesNotThrow(() => assertKnowledgePrivacy(experience));
   assert.doesNotThrow(() => assertKnowledgePrivacy(snapshot));
   const serialized = JSON.stringify(snapshot);
-  for (const secret of ['must disappear', 'conv-secret', '/secret.png', 'secret result', 'secret-key', 'secret-bytes', 'trace-secret', 'already-hashed-session-a']) {
+  for (const secret of [...secrets, 'must disappear', 'conv-secret', '/secret.png', 'secret result', 'secret-key', 'secret-bytes', 'trace-secret', 'already-hashed-session-a']) {
     assert.equal(serialized.includes(secret), false, `leaked ${secret}`);
   }
+  for (const key of ['message', 'note', 'payload', 'metadata']) assert.equal(key in experience, false);
 });
 
 test('same dataset produces same snapshotId regardless append order', () => {
@@ -95,13 +112,11 @@ test('DecisionEvent can compile to experience', () => {
 });
 
 test('tool recovery event can compile', () => {
-  const experience = compiler.compile(event({ toolRecoveryTriggered: true }));
-  assert.equal(experience.tools.recoveryTriggered, true);
+  assert.equal(compiler.compile(event({ toolRecoveryTriggered: true })).tools.recoveryTriggered, true);
 });
 
 test('rotation event can compile', () => {
-  const experience = compiler.compile(event({ rotationOccurred: true }));
-  assert.equal(experience.context.rotation, true);
+  assert.equal(compiler.compile(event({ rotationOccurred: true })).context.rotation, true);
 });
 
 test('routing fallback event can compile', () => {

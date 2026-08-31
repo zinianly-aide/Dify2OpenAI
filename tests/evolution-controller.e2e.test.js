@@ -6,6 +6,8 @@ import {
   GatewayKnowledgeStore,
   PatternImpactTracker,
   PatternMiner,
+  ReplayRunner,
+  ReplayVariant,
   RuntimeSkillSelector,
   SkillCandidateSelector,
   SkillEvaluator,
@@ -42,15 +44,21 @@ function runtimeExperiences() {
   }));
 }
 
-function replayCase({ taskId = 'task-a', candidateSuccess = 0.84 } = {}) {
+function replayCase({ taskId = 'task-a' } = {}) {
   return {
     taskId,
     client: 'dsh', model: 'model-0', backend: 'dify', toolAvailability: ['read', 'write'], contextBudget: 32000,
     evaluationCriteria: ['task-success', 'tool-success'],
-    noSkill: { taskSuccess: 0.70, toolSuccess: 0.80, toolRetry: 0.20, contextUsage: 0.80, tokenUsage: 1000, latency: 1000, cost: 0.02, errorRate: 0.10 },
-    baselineSkill: { taskSuccess: 0.76, toolSuccess: 0.84, toolRetry: 0.16, contextUsage: 0.76, tokenUsage: 950, latency: 980, cost: 0.019, errorRate: 0.08 },
-    candidateSkill: { taskSuccess: candidateSuccess, toolSuccess: 0.90, toolRetry: 0.10, contextUsage: 0.70, tokenUsage: 920, latency: 970, cost: 0.018, errorRate: 0.05 },
   };
+}
+
+class E2EReplayRunner extends ReplayRunner {
+  constructor({ candidateSuccess = 0.84 } = {}) { super({ runnerId: `e2e-runner-${candidateSuccess}` }); this.candidateSuccess = candidateSuccess; }
+  async execute({ variant }) {
+    if (variant === ReplayVariant.NO_SKILL) return { taskSuccess: 0.70, toolSuccess: 0.80, toolRetry: 0.20, contextUsage: 0.80, tokenUsage: 1000, latency: 1000, cost: 0.02, errorRate: 0.10 };
+    if (variant === ReplayVariant.BASELINE_SKILL) return { taskSuccess: 0.76, toolSuccess: 0.84, toolRetry: 0.16, contextUsage: 0.76, tokenUsage: 950, latency: 980, cost: 0.019, errorRate: 0.08 };
+    return { taskSuccess: this.candidateSuccess, toolSuccess: 0.90, toolRetry: 0.10, contextUsage: 0.70, tokenUsage: 920, latency: 970, cost: 0.018, errorRate: 0.05 };
+  }
 }
 
 test('success loop: runtime evidence to active selected skill to new outcome provenance', async () => {
@@ -69,7 +77,7 @@ test('success loop: runtime evidence to active selected skill to new outcome pro
   assert.ok(group);
   const candidate = await new SkillProposer().propose(group);
 
-  const replay = new SkillReplay().run({ skillId: candidate.skillId, scope: candidate.scope, cases: [replayCase()] });
+  const replay = await new SkillReplay().run({ skillId: candidate.skillId, scope: candidate.scope, cases: [replayCase()], runner: new E2EReplayRunner(), candidateSkill: candidate });
   const evaluation = new SkillEvaluator().evaluate(replay);
   assert.equal(evaluation.status, SkillStatus.REPLAY_PASSED);
 
@@ -77,7 +85,7 @@ test('success loop: runtime evidence to active selected skill to new outcome pro
   registry.register(candidate);
   registry.transition(candidate.skillId, SkillStatus.WIKI_SUPPORTED, { reasonCode: 'WIKI_SUPPORTED' });
   registry.transition(candidate.skillId, SkillStatus.REPLAY_PASSED, { reasonCode: evaluation.reasonCode });
-  registry.transition(candidate.skillId, SkillStatus.ACTIVE, { manual: true, reasonCode: 'MANUAL_APPROVAL_FOR_E2E' });
+  registry.activate(candidate.skillId, { reasonCode: 'MANUAL_APPROVAL_FOR_E2E' });
 
   const selected = new RuntimeSkillSelector().select(registry, {
     clientType: 'dsh', backendType: 'dify', modelFamily: 'model', taskType: 'coding-agent', requiredCapabilities: ['tools'],
@@ -110,7 +118,7 @@ test('failure loop: replay regression keeps Wiki and becomes impact evidence', a
     .select(patterns).find((item) => item.family === 'backend-routing');
   assert.ok(group);
   const candidate = await new SkillProposer().propose(group);
-  const replay = new SkillReplay().run({ skillId: candidate.skillId, scope: candidate.scope, cases: [replayCase({ candidateSuccess: 0.60 })] });
+  const replay = await new SkillReplay().run({ skillId: candidate.skillId, scope: candidate.scope, cases: [replayCase()], runner: new E2EReplayRunner({ candidateSuccess: 0.60 }), candidateSkill: candidate });
   const evaluation = new SkillEvaluator().evaluate(replay);
   assert.equal(evaluation.status, SkillStatus.REPLAY_FAILED);
 
@@ -154,7 +162,9 @@ test('Policy and Skill evolution freeze, disable, rollback and pins are independ
   const group = new SkillCandidateSelector({ promotionThreshold: 0.2, minimumEvidence: 6 }).select(groupPatterns)[0];
   const candidate = await new SkillProposer().propose(group);
   registry.register(candidate);
-  registry.transition(candidate.skillId, SkillStatus.ACTIVE, { manual: true, reasonCode: 'MANUAL_APPROVAL' });
+  registry.transition(candidate.skillId, SkillStatus.WIKI_SUPPORTED, { reasonCode: 'WIKI_SUPPORTED' });
+  registry.transition(candidate.skillId, SkillStatus.REPLAY_PASSED, { reasonCode: 'REPLAY_PASSED' });
+  registry.activate(candidate.skillId, { reasonCode: 'MANUAL_APPROVAL' });
   controller.manualSkillRollback({ registry, skillId: candidate.skillId });
   assert.equal(registry.get(candidate.skillId).status, SkillStatus.ROLLED_BACK);
 

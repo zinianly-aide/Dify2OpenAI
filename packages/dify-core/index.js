@@ -45,6 +45,7 @@ export * from './skill-candidate.js';
 export * from './skill-candidate-selector.js';
 export * from './skill-proposer.js';
 export * from './skill-registry.js';
+export * from './replay-runner.js';
 export * from './skill-replay.js';
 export * from './skill-evaluator.js';
 export * from './runtime-skill-selector.js';
