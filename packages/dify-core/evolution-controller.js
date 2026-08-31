@@ -27,6 +27,10 @@ export class EvolutionController {
 
   enableAnalysis(name) { this.#assertAnalysis(name); this.analysis.set(name, true); return this.#audit('ANALYSIS_ENABLED', { name }); }
   disableAnalysis(name) { this.#assertAnalysis(name); this.analysis.set(name, false); return this.#audit('ANALYSIS_DISABLED', { name }); }
+  enablePolicyEvolution(reasonCode = 'MANUAL_ENABLE') { this.policy.enabled = true; return this.#audit('POLICY_EVOLUTION_ENABLED', { reasonCode }); }
+  disablePolicyEvolution(reasonCode = 'MANUAL_DISABLE') { this.policy.enabled = false; return this.#audit('POLICY_EVOLUTION_DISABLED', { reasonCode }); }
+  enableSkillEvolution(reasonCode = 'MANUAL_ENABLE') { this.skill.enabled = true; return this.#audit('SKILL_EVOLUTION_ENABLED', { reasonCode }); }
+  disableSkillEvolution(reasonCode = 'MANUAL_DISABLE') { this.skill.enabled = false; return this.#audit('SKILL_EVOLUTION_DISABLED', { reasonCode }); }
   freezePolicyEvolution(reasonCode = 'MANUAL_FREEZE') { this.policy.frozen = true; return this.#audit('POLICY_EVOLUTION_FROZEN', { reasonCode }); }
   resumePolicyEvolution(reasonCode = 'MANUAL_RESUME') { this.policy.frozen = false; return this.#audit('POLICY_EVOLUTION_RESUMED', { reasonCode }); }
   freezeSkillEvolution(reasonCode = 'MANUAL_FREEZE') { this.skill.frozen = true; return this.#audit('SKILL_EVOLUTION_FROZEN', { reasonCode }); }
