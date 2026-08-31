@@ -3,6 +3,13 @@ import { createSkillCandidate, SkillScope } from './skill-candidate.js';
 const VALID_SCOPES = new Set(Object.values(SkillScope));
 const SECRET_VALUE = /(sk-[A-Za-z0-9_-]{8,}|bearer\s+[A-Za-z0-9._-]{8,}|BEGIN [A-Z ]*PRIVATE KEY|password\s*[:=])/i;
 
+function unique(patterns, key) {
+  return [...new Set(patterns.flatMap((p) => p.conditions?.environment?.[key] || []))].sort();
+}
+function requiredCapabilities(family) {
+  if (family === 'tool-calling') return ['tools'];
+  return [];
+}
 function deterministicProposal(group) {
   const patterns = group.patterns || [];
   const effective = [...new Set(patterns.flatMap((p) => p.effectiveStrategies || []))].sort();
@@ -24,6 +31,13 @@ function deterministicProposal(group) {
       sourcePatternIds: patterns.map((p) => p.patternId),
       knownFailedStrategies: failed,
       scope: group.scope,
+      bindings: {
+        clientTypes: unique(patterns, 'clientTypes'),
+        backendTypes: group.family === 'dify-session-management' ? ['dify'] : unique(patterns, 'backendTypes'),
+        backendIdHashes: unique(patterns, 'backendIdHashes'),
+        modelFamilies: unique(patterns, 'modelFamilies'),
+        requiredCapabilities: requiredCapabilities(group.family),
+      },
     },
     evidenceSummary: { patternCount: patterns.length, observationCount },
     confidence,
@@ -40,9 +54,9 @@ function validateSchema(proposal) {
 
 function validateScope(group, proposal) {
   if (!VALID_SCOPES.has(proposal.scope)) throw new Error('SKILL_PROPOSAL_SCOPE_INVALID');
-  if (proposal.scope !== group.scope) throw new Error('SKILL_PROPOSAL_SCOPE_MISMATCH');
   const hasBackendSpecific = (group.patterns || []).some((p) => p.scope === 'BACKEND_SPECIFIC' || p.scope === 'VERSION_SPECIFIC');
   if (hasBackendSpecific && proposal.scope === SkillScope.GENERAL) throw new Error('SKILL_NEGATIVE_TRANSFER_SCOPE_REJECTED');
+  if (proposal.scope !== group.scope) throw new Error('SKILL_PROPOSAL_SCOPE_MISMATCH');
 }
 
 function validateProvenance(group, proposal) {
@@ -54,11 +68,8 @@ function validateProvenance(group, proposal) {
 }
 
 function validateSize(proposal, maxInstructionChars) {
-  if (!String(proposal.instructions || '').trim() || String(proposal.instructions).length > maxInstructionChars) {
-    throw new Error('SKILL_PROPOSAL_SIZE_INVALID');
-  }
+  if (!String(proposal.instructions || '').trim() || String(proposal.instructions).length > maxInstructionChars) throw new Error('SKILL_PROPOSAL_SIZE_INVALID');
 }
-
 function validateSafety(proposal) {
   if (SECRET_VALUE.test(JSON.stringify(proposal))) throw new Error('SKILL_PROPOSAL_SAFETY_REJECTED');
 }
