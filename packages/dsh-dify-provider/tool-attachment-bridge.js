@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { imageAttachmentFromDshBlock, sha256 } from '@zinianly-aide/dify-core';
+import { sha256 } from '@zinianly-aide/dify-core';
 
 const IMAGE_MEDIA_BY_EXTENSION = Object.freeze({
   '.png': 'image/png',
@@ -11,7 +11,7 @@ const IMAGE_MEDIA_BY_EXTENSION = Object.freeze({
   '.webp': 'image/webp',
   '.gif': 'image/gif',
 });
-const READ_IMAGE_PATH_KEYS = Object.freeze(['path', 'file', 'file_path', 'image_path']);
+const READ_IMAGE_PATH_KEYS = Object.freeze(['file_path', 'path', 'file', 'image_path']);
 
 function userKey(sessionId) {
   return `dsh-${sha256(String(sessionId)).slice(0, 24)}`;
@@ -21,12 +21,16 @@ function entryKey(user, callId) {
   return `${String(user)}::${String(callId)}`;
 }
 
+function uploadKey(user, descriptor) {
+  return `${String(user)}::${String(descriptor.toolCallId)}::${String(descriptor.fingerprint)}`;
+}
+
 function attachmentKey(attachment) {
   const source = attachment?.source || {};
   if (source.kind === 'dsh_attachment') return `dsh:${String(source.attachment?.attachmentId || '')}`;
   if (source.kind === 'data') return `data:${String(source.contentHash || '')}`;
   if (source.kind === 'url') return `url:${String(source.url || '')}`;
-  if (source.kind === 'local_file') return `local:${String(source.cacheKey || source.contentHash || '')}`;
+  if (source.kind === 'local_file') return `local:${String(source.uploadIdentity || source.fingerprint || '')}`;
   return JSON.stringify(attachment);
 }
 
@@ -35,18 +39,6 @@ function queryToolCallIds(query) {
   const re = /tool_result tool_call_id=([^\s:]+)/g;
   for (const match of String(query || '').matchAll(re)) ids.push(String(match[1]));
   return [...new Set(ids)];
-}
-
-function canonicalImages(content) {
-  const out = [];
-  for (const block of Array.isArray(content) ? content : []) {
-    if (block?.type === 'image') {
-      const image = imageAttachmentFromDshBlock(block);
-      if (image) out.push(image);
-    }
-    if (block?.type === 'tool-result' && Array.isArray(block.content)) out.push(...canonicalImages(block.content));
-  }
-  return out;
 }
 
 function bridgeError(code, message) {
@@ -77,6 +69,32 @@ function withinRoot(root, candidate) {
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
+function configuredAllowedRoots(allowedRoots = []) {
+  const envRoots = String(process.env.DSH_READ_IMAGE_ALLOW_ROOTS || '')
+    .split(path.delimiter)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return [...allowedRoots, ...envRoots];
+}
+
+async function realAllowedRoots(workspaceRoot, allowedRoots) {
+  const workspaceInput = String(workspaceRoot || process.env.DSH_WORKSPACE_ROOT || process.env.GITHUB_WORKSPACE || process.cwd());
+  let workspace;
+  try { workspace = await fs.realpath(workspaceInput); } catch {
+    throw bridgeError('READ_IMAGE_PATH_OUTSIDE_ALLOWED_ROOT', 'configured read_image workspace root is unavailable');
+  }
+  const roots = [workspace];
+  for (const input of configuredAllowedRoots(allowedRoots)) {
+    try {
+      const resolved = await fs.realpath(String(input));
+      if (!roots.includes(resolved)) roots.push(resolved);
+    } catch {
+      throw bridgeError('READ_IMAGE_PATH_OUTSIDE_ALLOWED_ROOT', 'configured read_image allow-root is unavailable');
+    }
+  }
+  return { workspace, roots };
+}
+
 function mediaTypeFromHeader(header) {
   const bytes = Buffer.from(header || []);
   if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
@@ -86,19 +104,17 @@ function mediaTypeFromHeader(header) {
   return null;
 }
 
-async function inspectImageFile(rawPath, workspaceRoot) {
-  const rootInput = String(workspaceRoot || process.env.DSH_WORKSPACE_ROOT || process.env.GITHUB_WORKSPACE || process.cwd());
-  let root;
-  try { root = await fs.realpath(rootInput); } catch {
-    throw bridgeError('READ_IMAGE_PATH_OUTSIDE_ALLOWED_ROOT', 'configured read_image workspace root is unavailable');
-  }
-  const requested = path.isAbsolute(rawPath) ? path.normalize(rawPath) : path.resolve(root, rawPath);
+async function inspectImageFile(rawPath, workspaceRoot, allowedRoots = []) {
+  const { workspace, roots } = await realAllowedRoots(workspaceRoot, allowedRoots);
+  const requested = path.isAbsolute(rawPath) ? path.normalize(rawPath) : path.resolve(workspace, rawPath);
   let resolved;
   try { resolved = await fs.realpath(requested); } catch (error) {
     if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') throw bridgeError('READ_IMAGE_FILE_NOT_FOUND', 'read_image target does not exist');
     throw bridgeError('READ_IMAGE_FILE_NOT_FOUND', 'read_image target cannot be resolved');
   }
-  if (!withinRoot(root, resolved)) throw bridgeError('READ_IMAGE_PATH_OUTSIDE_ALLOWED_ROOT', 'read_image target resolves outside the allowed workspace root');
+  if (!roots.some((root) => withinRoot(root, resolved))) {
+    throw bridgeError('READ_IMAGE_PATH_OUTSIDE_ALLOWED_ROOT', 'read_image target resolves outside an allowed root');
+  }
   const info = await fs.stat(resolved);
   if (!info.isFile()) throw bridgeError('READ_IMAGE_NOT_REGULAR_FILE', 'read_image target is not a regular file');
 
@@ -114,7 +130,7 @@ async function inspectImageFile(rawPath, workspaceRoot) {
   const detected = mediaTypeFromHeader(header);
   const extension = path.extname(resolved).toLowerCase();
   const declared = IMAGE_MEDIA_BY_EXTENSION[extension] || null;
-  if (!detected || (declared && declared !== detected) || (!declared && extension)) {
+  if (!detected || !declared || declared !== detected) {
     throw bridgeError('READ_IMAGE_UNSUPPORTED_TYPE', 'read_image target is not a supported PNG/JPEG/WebP/GIF image');
   }
 
@@ -128,17 +144,29 @@ async function inspectImageFile(rawPath, workspaceRoot) {
   return {
     localPath: resolved,
     mediaType: detected,
-    contentHash: digest.digest('hex'),
+    fingerprint: digest.digest('hex'),
     pathHash: sha256(`path:${resolved}`).slice(0, 24),
   };
 }
 
+function safeDescriptor(callId, file) {
+  return Object.freeze({
+    toolCallId: String(callId),
+    mediaType: file.mediaType,
+    localPath: file.localPath,
+    source: 'read_image',
+    fingerprint: file.fingerprint,
+  });
+}
+
 export class ToolAttachmentBridge {
-  constructor({ workspaceRoot } = {}) {
+  constructor({ workspaceRoot, allowedRoots = [] } = {}) {
     this.workspaceRoot = workspaceRoot || process.env.DSH_WORKSPACE_ROOT || process.env.GITHUB_WORKSPACE || process.cwd();
+    this.allowedRoots = Object.freeze([...allowedRoots]);
     this.entries = new Map();
     this.completed = new Map();
     this.owners = new Map();
+    this.uploadLedger = new Map();
   }
 
   registerOwnership(sessionId, callId) {
@@ -168,32 +196,22 @@ export class ToolAttachmentBridge {
     const key = entryKey(user, id);
     try {
       const rawPath = parseReadImageArguments(block?.arguments ?? block?.input);
-      const file = await inspectImageFile(rawPath, this.workspaceRoot);
-      const cacheKey = `${user}::${id}::${file.contentHash}`;
+      const file = await inspectImageFile(rawPath, this.workspaceRoot, this.allowedRoots);
       const existing = this.entries.get(key) || this.completed.get(key);
-      if (existing?.length) {
-        const matched = existing.find((attachment) => attachment?.source?.kind === 'local_file' && attachment.source.cacheKey === cacheKey);
-        if (matched) {
-          return { detected: true, registered: true, resolved: true, reused: true, sessionHash, toolCallIdHash, pathHash: file.pathHash, mediaType: file.mediaType };
-        }
+      if (existing?.fingerprint === file.fingerprint) {
+        return {
+          detected: true, registered: true, resolved: true, reused: true,
+          sessionHash, toolCallIdHash, pathHash: file.pathHash, mediaType: file.mediaType,
+          reasonCode: 'READ_IMAGE_DESCRIPTOR_REUSED',
+        };
       }
-      const attachment = {
-        type: 'image',
-        source: {
-          kind: 'local_file',
-          localPath: file.localPath,
-          mimeType: file.mediaType,
-          contentHash: file.contentHash,
-          cacheKey,
-          source: 'read_image',
-          toolCallIdHash,
-          sessionHash,
-          pathHash: file.pathHash,
-        },
-      };
-      this.entries.set(key, [attachment]);
+      this.entries.set(key, safeDescriptor(id, file));
       this.completed.delete(key);
-      return { detected: true, registered: true, resolved: true, reused: false, sessionHash, toolCallIdHash, pathHash: file.pathHash, mediaType: file.mediaType };
+      return {
+        detected: true, registered: true, resolved: true, reused: false,
+        sessionHash, toolCallIdHash, pathHash: file.pathHash, mediaType: file.mediaType,
+        reasonCode: 'READ_IMAGE_DESCRIPTOR_REGISTERED',
+      };
     } catch (error) {
       return { detected: true, registered: true, resolved: false, sessionHash, toolCallIdHash, reasonCode: String(error?.code || 'READ_IMAGE_ARGUMENTS_INVALID') };
     }
@@ -208,12 +226,28 @@ export class ToolAttachmentBridge {
     if (!owners || owners.size !== 1) return false;
     const [user] = owners;
     const key = entryKey(user, id);
-    if (this.entries.get(key)?.length || this.completed.get(key)?.length) return true;
-    const images = canonicalImages(result?.content);
-    if (!images.length) return false;
-    const unique = new Map(images.map((image) => [attachmentKey(image), image]));
-    this.entries.set(key, [...unique.values()]);
-    return true;
+    return Boolean(this.entries.get(key) || this.completed.get(key));
+  }
+
+  attachmentFor(user, descriptor) {
+    const identity = uploadKey(user, descriptor);
+    const uploadFileId = this.uploadLedger.get(identity);
+    return {
+      type: 'image',
+      source: {
+        kind: 'local_file',
+        localPath: descriptor.localPath,
+        mimeType: descriptor.mediaType,
+        fingerprint: descriptor.fingerprint,
+        toolCallId: descriptor.toolCallId,
+        uploadIdentity: identity,
+        ...(uploadFileId ? { uploadFileId } : {}),
+        rememberUpload: (id) => {
+          const value = String(id || '');
+          if (value) this.uploadLedger.set(identity, value);
+        },
+      },
+    };
   }
 
   resolve(user, query) {
@@ -223,15 +257,14 @@ export class ToolAttachmentBridge {
     const seen = new Set();
     for (const callId of callIds) {
       const key = entryKey(user, callId);
-      const entry = this.entries.get(key) || this.completed.get(key);
-      if (!entry?.length) continue;
+      const descriptor = this.entries.get(key) || this.completed.get(key);
+      if (!descriptor) continue;
       matchedCallIds.push(callId);
-      for (const image of entry) {
-        const keyOfImage = attachmentKey(image);
-        if (seen.has(keyOfImage)) continue;
-        seen.add(keyOfImage);
-        images.push(image);
-      }
+      const image = this.attachmentFor(user, descriptor);
+      const keyOfImage = attachmentKey(image);
+      if (seen.has(keyOfImage)) continue;
+      seen.add(keyOfImage);
+      images.push(image);
     }
     return { callIds: matchedCallIds, attachments: images };
   }
@@ -244,9 +277,9 @@ export class ToolAttachmentBridge {
     for (const callId of callIds) {
       const id = String(callId);
       const key = entryKey(user, id);
-      const entry = this.entries.get(key);
-      if (entry?.length) {
-        this.completed.set(key, entry);
+      const descriptor = this.entries.get(key);
+      if (descriptor) {
+        this.completed.set(key, descriptor);
         this.entries.delete(key);
       }
       const owners = this.owners.get(id);
@@ -266,6 +299,7 @@ export class ToolAttachmentBridge {
     const prefix = `${user}::`;
     for (const key of this.entries.keys()) if (key.startsWith(prefix)) this.entries.delete(key);
     for (const key of this.completed.keys()) if (key.startsWith(prefix)) this.completed.delete(key);
+    for (const key of this.uploadLedger.keys()) if (key.startsWith(prefix)) this.uploadLedger.delete(key);
     for (const [callId, owners] of this.owners.entries()) {
       owners.delete(user);
       if (!owners.size) this.owners.delete(callId);

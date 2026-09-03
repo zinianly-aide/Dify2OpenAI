@@ -121,10 +121,10 @@ function rawContentHash(bytes) {
 
 async function resolveLocalFileUpload({ baseURL, apiKey, attachment, user, signal, headers }) {
   const source = attachment?.source || {};
-  if (!source.localPath || !source.mimeType || !source.contentHash || !source.cacheKey) {
+  if (!source.localPath || !source.mimeType || !source.fingerprint || !source.toolCallId || !source.uploadIdentity) {
     throw attachmentError('read_image local attachment descriptor is incomplete', 'READ_IMAGE_ARGUMENTS_INVALID');
   }
-  if (source.uploadFileId && source.uploadedContentHash === source.contentHash) return String(source.uploadFileId);
+  if (source.uploadFileId) return String(source.uploadFileId);
   let info;
   try { info = await fs.stat(source.localPath); } catch (error) {
     if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') throw attachmentError('read_image target disappeared before upload', 'READ_IMAGE_FILE_NOT_FOUND');
@@ -132,12 +132,20 @@ async function resolveLocalFileUpload({ baseURL, apiKey, attachment, user, signa
   }
   if (!info.isFile()) throw attachmentError('read_image target is no longer a regular file', 'READ_IMAGE_NOT_REGULAR_FILE');
   const bytes = await fs.readFile(source.localPath);
-  if (rawContentHash(bytes) !== source.contentHash) {
+  if (rawContentHash(bytes) !== source.fingerprint) {
     throw attachmentError('read_image target changed after correlation and before upload', 'READ_IMAGE_FILE_CHANGED');
   }
-  const uploadFileId = await uploadDifyImageBytes({ baseURL, apiKey, bytes, mimeType: source.mimeType, contentHash: source.contentHash, user, signal, headers });
-  source.uploadFileId = uploadFileId;
-  source.uploadedContentHash = source.contentHash;
+  const uploadFileId = await uploadDifyImageBytes({
+    baseURL,
+    apiKey,
+    bytes,
+    mimeType: source.mimeType,
+    contentHash: source.fingerprint,
+    user,
+    signal,
+    headers,
+  });
+  if (typeof source.rememberUpload === 'function') source.rememberUpload(uploadFileId);
   return uploadFileId;
 }
 
