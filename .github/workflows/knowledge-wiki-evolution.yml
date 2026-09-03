@@ -1,0 +1,33 @@
+name: Knowledge Wiki Evolution
+
+on:
+  push:
+    branches:
+      - feat/gateway-knowledge-plane
+    paths:
+      - 'packages/dify-core/evolution-log.js'
+      - 'packages/dify-core/pattern-impact-tracker.js'
+      - 'packages/dify-core/wiki-maintainer.js'
+      - 'packages/dify-core/gateway-wiki.js'
+      - 'packages/dify-core/knowledge-pattern.js'
+      - 'packages/dify-core/index.js'
+      - 'tests/wiki-evolution.test.js'
+      - 'tests/knowledge-pattern-miner.test.js'
+      - '.github/workflows/knowledge-wiki-evolution.yml'
+  workflow_dispatch:
+
+jobs:
+  wiki-evolution:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Run Phase 2 pattern regression
+        run: node --test tests/knowledge-pattern-miner.test.js
+      - name: Run Phase 3 wiki evolution tests
+        run: node --test tests/wiki-evolution.test.js
+      - name: Run privacy foundation regression
+        run: node --test tests/knowledge-plane-foundation.test.js

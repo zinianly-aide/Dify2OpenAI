@@ -1,0 +1,32 @@
+name: Skill Candidate Proposal
+
+on:
+  push:
+    branches:
+      - feat/gateway-knowledge-plane
+    paths:
+      - 'packages/dify-core/skill-candidate.js'
+      - 'packages/dify-core/skill-candidate-selector.js'
+      - 'packages/dify-core/skill-proposer.js'
+      - 'packages/dify-core/knowledge-pattern.js'
+      - 'packages/dify-core/index.js'
+      - 'tests/skill-candidate-proposal.test.js'
+      - 'tests/wiki-evolution.test.js'
+      - '.github/workflows/skill-candidate-proposal.yml'
+  workflow_dispatch:
+
+jobs:
+  candidate-skill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Run Phase 3 wiki regression
+        run: node --test tests/wiki-evolution.test.js
+      - name: Run Phase 4 candidate skill tests
+        run: node --test tests/skill-candidate-proposal.test.js
+      - name: Run knowledge privacy regression
+        run: node --test tests/knowledge-plane-foundation.test.js

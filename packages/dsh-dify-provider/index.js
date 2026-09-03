@@ -57,6 +57,10 @@ function emitBridgeDiagnostic(ctx, event) {
   if (process.env.DIFY_TELEMETRY_STDOUT === '1') console.log(line);
 }
 
+function pendingLocalUploads(attachments) {
+  return attachments.filter((attachment) => attachment?.source?.kind === 'local_file' && !attachment.source.uploadFileId);
+}
+
 export function apply(ctx, config) {
   const providerId = String(config.providerId || 'dify').trim();
   if (!providerId) throw new Error('dsh-dify-provider providerId must be non-empty');
@@ -122,14 +126,32 @@ export function apply(ctx, config) {
   adapter.stream = async function* streamWithToolOwnership(options) {
     for await (const chunk of stream(options)) {
       if (chunk?.type === 'block-end' && chunk?.block?.type === 'tool-call') {
-        const registered = toolAttachments.registerOwnership(options?.sessionId, chunk.block.id);
+        const diagnostic = await toolAttachments.registerToolCall(options?.sessionId, chunk.block);
         emitBridgeDiagnostic(ctx, {
           event: 'tool-call-ownership',
           toolName: String(chunk.block.name || '').slice(0, 80),
           hasCallId: Boolean(chunk.block.id),
           hasSessionId: options?.sessionId !== undefined && options?.sessionId !== null,
-          registered,
+          registered: diagnostic.registered,
+          sessionHash: diagnostic.sessionHash,
+          toolCallIdHash: diagnostic.toolCallIdHash,
         });
+        if (diagnostic.detected) {
+          emitBridgeDiagnostic(ctx, {
+            event: 'read_image_detected',
+            sessionHash: diagnostic.sessionHash,
+            toolCallIdHash: diagnostic.toolCallIdHash,
+            reasonCode: diagnostic.reasonCode || null,
+          });
+          emitBridgeDiagnostic(ctx, {
+            event: 'attachment_resolved',
+            resolved: diagnostic.resolved === true,
+            sessionHash: diagnostic.sessionHash,
+            toolCallIdHash: diagnostic.toolCallIdHash,
+            pathHash: diagnostic.pathHash || null,
+            reasonCode: diagnostic.reasonCode || null,
+          });
+        }
       }
       yield chunk;
     }
@@ -139,6 +161,7 @@ export function apply(ctx, config) {
   adapter.collect = async (app, body, signal, attachments = []) => {
     const pending = toolAttachments.resolve(body?.user, body?.query);
     const merged = mergeAttachments(attachments, pending.attachments);
+    const uploads = pendingLocalUploads(pending.attachments);
     if (pending.callIds.length || pending.attachments.length) {
       emitBridgeDiagnostic(ctx, {
         event: 'continuation-resolve',
@@ -146,9 +169,44 @@ export function apply(ctx, config) {
         attachmentCount: pending.attachments.length,
       });
     }
-    const response = await collect(app, body, signal, merged);
-    if (pending.callIds.length) toolAttachments.consume(body?.user, pending.callIds);
-    return response;
+    for (const attachment of uploads) {
+      emitBridgeDiagnostic(ctx, {
+        event: 'upload_started',
+        sessionHash: attachment.source.sessionHash || null,
+        toolCallIdHash: attachment.source.toolCallIdHash || null,
+        pathHash: attachment.source.pathHash || null,
+      });
+    }
+    try {
+      const response = await collect(app, body, signal, merged);
+      for (const attachment of uploads) {
+        emitBridgeDiagnostic(ctx, {
+          event: 'upload_succeeded',
+          sessionHash: attachment.source.sessionHash || null,
+          toolCallIdHash: attachment.source.toolCallIdHash || null,
+          pathHash: attachment.source.pathHash || null,
+        });
+      }
+      if (pending.callIds.length || pending.attachments.length) {
+        emitBridgeDiagnostic(ctx, {
+          event: 'files_attached_count',
+          count: pending.attachments.length,
+        });
+      }
+      if (pending.callIds.length) toolAttachments.consume(body?.user, pending.callIds);
+      return response;
+    } catch (error) {
+      for (const attachment of uploads) {
+        emitBridgeDiagnostic(ctx, {
+          event: 'upload_failed',
+          sessionHash: attachment.source.sessionHash || null,
+          toolCallIdHash: attachment.source.toolCallIdHash || null,
+          pathHash: attachment.source.pathHash || null,
+          reasonCode: String(error?.code || 'DIFY_ATTACHMENT_ERROR').slice(0, 120),
+        });
+      }
+      throw error;
+    }
   };
 
   const resetSession = adapter.resetSession.bind(adapter);

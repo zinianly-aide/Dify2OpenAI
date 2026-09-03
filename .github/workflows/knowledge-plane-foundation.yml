@@ -1,0 +1,32 @@
+name: Knowledge Plane Foundation
+
+on:
+  push:
+    branches:
+      - feat/gateway-knowledge-plane
+    paths:
+      - 'packages/dify-core/knowledge-experience.js'
+      - 'packages/dify-core/experience-compiler.js'
+      - 'packages/dify-core/gateway-knowledge-store.js'
+      - 'packages/dify-core/index.js'
+      - 'tests/knowledge-plane-foundation.test.js'
+      - '.github/workflows/knowledge-plane-foundation.yml'
+  workflow_dispatch:
+
+jobs:
+  knowledge-plane-foundation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Run Knowledge Plane foundation tests
+        run: node --test tests/knowledge-plane-foundation.test.js
+      - name: Run related deterministic regression tests
+        run: |
+          node --test \
+            tests/offline-policy.test.js \
+            tests/backend-routing.test.js \
+            tests/tool-optimization.test.js

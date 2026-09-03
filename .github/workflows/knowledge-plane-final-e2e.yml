@@ -1,0 +1,47 @@
+name: Knowledge Plane Final E2E
+
+on:
+  push:
+    branches:
+      - feat/gateway-knowledge-plane
+    paths:
+      - 'packages/dify-core/evolution-controller.js'
+      - 'packages/dify-core/runtime-skill-selector.js'
+      - 'packages/dify-core/pattern-miner.js'
+      - 'packages/dify-core/skill-proposer.js'
+      - 'packages/dify-core/index.js'
+      - 'tests/evolution-controller.e2e.test.js'
+      - '.github/workflows/knowledge-plane-final-e2e.yml'
+  workflow_dispatch:
+
+jobs:
+  knowledge-plane-final:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Run all Knowledge Plane phase gates
+        run: |
+          node --test \
+            tests/knowledge-plane-foundation.test.js \
+            tests/knowledge-pattern-miner.test.js \
+            tests/wiki-evolution.test.js \
+            tests/skill-candidate-proposal.test.js \
+            tests/skill-replay-registry.test.js \
+            tests/evolution-controller.e2e.test.js
+      - name: Run Policy Evolution regression
+        run: |
+          node --test \
+            tests/offline-policy.test.js \
+            tests/policy-canary.test.js \
+            tests/policy-canary-final.test.js \
+            tests/policy-promotion-atomicity.test.js
+      - name: Run routing tool and lifecycle regressions
+        run: |
+          node --test \
+            tests/backend-routing.test.js \
+            tests/tool-optimization.test.js \
+            tests/checkpoint-generation.test.js

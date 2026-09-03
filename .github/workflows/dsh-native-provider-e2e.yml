@@ -10,7 +10,14 @@ jobs:
   dsh-native-provider-e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        dsh-version:
+          - 0.1.0-rc.7
+          - 0.1.0-rc.8
     env:
+      DSH_VERSION: ${{ matrix.dsh-version }}
       DSH_HOME: /tmp/dsh-native-dify-home
       DSH_PERMISSION_MODE: danger-full-access
       DIFY_PROVIDER_ID: dify
@@ -26,6 +33,7 @@ jobs:
       FAKE_DIFY_NATIVE_UPLOAD_OUTPUT: /tmp/fake-dify-native-uploads.json
       FAKE_DIFY_NATIVE_IMAGE_E2E: '1'
       FAKE_DIFY_NATIVE_IMAGE_PATH: ${{ github.workspace }}/dsh-native-read-image.png
+      DSH_WORKSPACE_ROOT: ${{ github.workspace }}
       CI: 'true'
     steps:
       - name: Checkout
@@ -37,13 +45,18 @@ jobs:
           node-version: '24'
 
       - name: Install pinned DSH and pnpm
-        run: npm install -g pnpm@10 @deepseek-ai/dsh@0.1.0-rc.8
+        run: npm install -g pnpm@10 "@deepseek-ai/dsh@${DSH_VERSION}"
 
-      - name: Install native provider development dependencies
+      - name: Install matrix-matched native provider development dependencies
         shell: bash
         run: |
           cd packages/dsh-dify-provider
           pnpm install --no-frozen-lockfile
+          pnpm add -D "@deepseek-ai/dsh-credentials@${DSH_VERSION}" "@deepseek-ai/dsh-llm@${DSH_VERSION}"
+
+      - name: Run read_image bridge unit tests
+        shell: bash
+        run: node --test packages/dsh-dify-provider/test/read-image-bridge.test.js
 
       - name: Initialize headless profile
         run: dsh --profile headless --dump-config > /tmp/dsh-native-base-config.txt
@@ -99,6 +112,73 @@ jobs:
           fi
           echo "$output" | grep -q "DSH_NATIVE_PROVIDER_OK"
 
+      - name: Verify emitted read_image descriptor bridge
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const output = fs.readFileSync('/tmp/dsh-native-output.log', 'utf8');
+          const events = [];
+          for (const line of output.split(/\r?\n/)) {
+            const start = line.indexOf('{');
+            if (start < 0) continue;
+            try {
+              const parsed = JSON.parse(line.slice(start));
+              if (parsed.component === 'dify-tool-attachment-bridge') events.push(parsed);
+            } catch {}
+          }
+          const ownership = events.find((event) => event.event === 'tool-call-ownership' && event.toolName === 'read_image');
+          if (!ownership?.registered) throw new Error('real DSH read_image ownership was not registered');
+          const descriptor = events.find((event) => event.event === 'attachment_resolved' && event.resolved === true);
+          if (!descriptor) throw new Error('emitted read_image did not register a safe descriptor');
+          if (!descriptor.sessionHash || !descriptor.toolCallIdHash) throw new Error('descriptor diagnostics lost session/tool call correlation');
+          if (JSON.stringify(events).includes(process.env.FAKE_DIFY_NATIVE_IMAGE_PATH)) throw new Error('attachment telemetry leaked the real local path');
+          console.log(JSON.stringify({
+            result: 'PASS',
+            dshVersion: process.env.DSH_VERSION,
+            emittedReadImage: true,
+            ownershipRegistered: true,
+            descriptorRegistered: true,
+          }, null, 2));
+          NODE
+
+      - name: Verify rc.8 text-only isError regression shape
+        if: matrix.dsh-version == '0.1.0-rc.8'
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const output = fs.readFileSync('/tmp/dsh-native-output.log', 'utf8');
+          const events = [];
+          for (const line of output.split(/\r?\n/)) {
+            const start = line.indexOf('{');
+            if (start < 0) continue;
+            try {
+              const parsed = JSON.parse(line.slice(start));
+              if (parsed.component === 'dify-tool-attachment-bridge') events.push(parsed);
+            } catch {}
+          }
+          const result = events.find((event) => event.event === 'tools/result' && event.toolName === 'read_image');
+          if (!result) throw new Error('missing rc.8 read_image tools/result diagnostic');
+          if (result.isError !== true) throw new Error('rc.8 regression no longer reproduced isError=true');
+          if (!Array.isArray(result.contentBlockTypes) || result.contentBlockTypes.length !== 1 || result.contentBlockTypes[0] !== 'text') {
+            throw new Error(`rc.8 expected text-only result, got ${JSON.stringify(result.contentBlockTypes)}`);
+          }
+          if (result.imageBlockCount !== 0) throw new Error(`rc.8 expected no image block, got ${result.imageBlockCount}`);
+          if (result.captured !== false) throw new Error('rc.8 expected result-stage capture=false');
+          const descriptor = events.find((event) => event.event === 'attachment_resolved' && event.resolved === true);
+          if (!descriptor) throw new Error('rc.8 text-only result lost emitted-call descriptor');
+          console.log(JSON.stringify({
+            result: 'PASS',
+            dshVersion: process.env.DSH_VERSION,
+            isError: true,
+            textOnly: true,
+            imageBlockCount: 0,
+            captured: false,
+            descriptorPreserved: true,
+          }, null, 2));
+          NODE
+
       - name: Verify Session to Conversation continuity
         shell: bash
         run: |
@@ -125,6 +205,7 @@ jobs:
           if (bootstrap.headers.authorization !== '***') throw new Error('native provider did not use configured Dify credential');
           console.log(JSON.stringify({
             result: 'PASS',
+            dshVersion: process.env.DSH_VERSION,
             requestCount: requests.length,
             sessionHashUser: bootstrap.sessionHashUser,
             bootstrapConversationIdIn: bootstrap.body.conversation_id || '',
@@ -166,9 +247,11 @@ jobs:
           }
           console.log(JSON.stringify({
             result: 'PASS',
+            dshVersion: process.env.DSH_VERSION,
             realDshReadImage: true,
             uploadCount: uploads.length,
             uploadId: upload.id,
+            bootstrapFileCount: bootstrap.fileCount,
             continuationConversationId: continuation.body.conversation_id,
             continuationFileCount: continuation.fileCount,
             duplicateImageUpload: false,
