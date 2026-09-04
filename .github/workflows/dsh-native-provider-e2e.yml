@@ -16,6 +16,7 @@ jobs:
         dsh-version:
           - 0.1.0-rc.7
           - 0.1.0-rc.8
+          - 0.1.3-alpha.1
     env:
       DSH_VERSION: ${{ matrix.dsh-version }}
       DSH_HOME: /tmp/dsh-native-dify-home
@@ -133,13 +134,7 @@ jobs:
           if (!descriptor) throw new Error('emitted read_image did not register a safe descriptor');
           if (!descriptor.sessionHash || !descriptor.toolCallIdHash) throw new Error('descriptor diagnostics lost session/tool call correlation');
           if (JSON.stringify(events).includes(process.env.FAKE_DIFY_NATIVE_IMAGE_PATH)) throw new Error('attachment telemetry leaked the real local path');
-          console.log(JSON.stringify({
-            result: 'PASS',
-            dshVersion: process.env.DSH_VERSION,
-            emittedReadImage: true,
-            ownershipRegistered: true,
-            descriptorRegistered: true,
-          }, null, 2));
+          console.log(JSON.stringify({ result: 'PASS', dshVersion: process.env.DSH_VERSION, emittedReadImage: true, ownershipRegistered: true, descriptorRegistered: true }, null, 2));
           NODE
 
       - name: Verify rc.8 text-only isError regression shape
@@ -161,22 +156,12 @@ jobs:
           const result = events.find((event) => event.event === 'tools/result' && event.toolName === 'read_image');
           if (!result) throw new Error('missing rc.8 read_image tools/result diagnostic');
           if (result.isError !== true) throw new Error('rc.8 regression no longer reproduced isError=true');
-          if (!Array.isArray(result.contentBlockTypes) || result.contentBlockTypes.length !== 1 || result.contentBlockTypes[0] !== 'text') {
-            throw new Error(`rc.8 expected text-only result, got ${JSON.stringify(result.contentBlockTypes)}`);
-          }
+          if (!Array.isArray(result.contentBlockTypes) || result.contentBlockTypes.length !== 1 || result.contentBlockTypes[0] !== 'text') throw new Error(`rc.8 expected text-only result, got ${JSON.stringify(result.contentBlockTypes)}`);
           if (result.imageBlockCount !== 0) throw new Error(`rc.8 expected no image block, got ${result.imageBlockCount}`);
           if (result.captured !== false) throw new Error('rc.8 expected result-stage capture=false');
           const descriptor = events.find((event) => event.event === 'attachment_resolved' && event.resolved === true);
           if (!descriptor) throw new Error('rc.8 text-only result lost emitted-call descriptor');
-          console.log(JSON.stringify({
-            result: 'PASS',
-            dshVersion: process.env.DSH_VERSION,
-            isError: true,
-            textOnly: true,
-            imageBlockCount: 0,
-            captured: false,
-            descriptorPreserved: true,
-          }, null, 2));
+          console.log(JSON.stringify({ result: 'PASS', dshVersion: process.env.DSH_VERSION, isError: true, textOnly: true, imageBlockCount: 0, captured: false, descriptorPreserved: true }, null, 2));
           NODE
 
       - name: Verify Session to Conversation continuity
@@ -191,32 +176,15 @@ jobs:
           if (!bootstrap) throw new Error('missing main BOOTSTRAP request');
           if (!continuation) throw new Error('missing TOOL_CONTINUE request');
           if ((bootstrap.body.conversation_id || '') !== '') throw new Error('BOOTSTRAP must start with empty conversation_id');
-          if (continuation.body.conversation_id !== bootstrap.assignedConversationId) {
-            throw new Error(`TOOL_CONTINUE did not reuse ${bootstrap.assignedConversationId}: ${continuation.body.conversation_id}`);
-          }
+          if (continuation.body.conversation_id !== bootstrap.assignedConversationId) throw new Error(`TOOL_CONTINUE did not reuse ${bootstrap.assignedConversationId}: ${continuation.body.conversation_id}`);
           if (continuation.sessionHashUser !== bootstrap.sessionHashUser) throw new Error('DSH Session hash changed across main rounds');
           if (!/call_native_001/.test(continuation.body.query || '')) throw new Error('tool result continuation lost tool_call_id');
           if (!(continuation.toolResultPayloadLength > 0)) throw new Error('correlated tool result payload was empty');
           if (continuation.hasToolSchema) throw new Error('unchanged tool schema was resent after auxiliary call');
           const auxiliaries = requests.filter((r) => r !== bootstrap && r !== continuation);
-          if (auxiliaries.some((r) => (r.body.conversation_id || '') !== '')) {
-            throw new Error('auxiliary DSH calls must not reuse the main Dify conversation');
-          }
+          if (auxiliaries.some((r) => (r.body.conversation_id || '') !== '')) throw new Error('auxiliary DSH calls must not reuse the main Dify conversation');
           if (bootstrap.headers.authorization !== '***') throw new Error('native provider did not use configured Dify credential');
-          console.log(JSON.stringify({
-            result: 'PASS',
-            dshVersion: process.env.DSH_VERSION,
-            requestCount: requests.length,
-            sessionHashUser: bootstrap.sessionHashUser,
-            bootstrapConversationIdIn: bootstrap.body.conversation_id || '',
-            bootstrapConversationIdOut: bootstrap.assignedConversationId,
-            continuationConversationIdIn: continuation.body.conversation_id,
-            auxiliaryRequestCount: auxiliaries.length,
-            auxiliaryIsolated: true,
-            toolResultCorrelated: true,
-            toolResultPayloadLength: continuation.toolResultPayloadLength,
-            toolSchemaReused: true,
-          }, null, 2));
+          console.log(JSON.stringify({ result: 'PASS', dshVersion: process.env.DSH_VERSION, requestCount: requests.length, sessionHashUser: bootstrap.sessionHashUser, bootstrapConversationIdIn: bootstrap.body.conversation_id || '', bootstrapConversationIdOut: bootstrap.assignedConversationId, continuationConversationIdIn: continuation.body.conversation_id, auxiliaryRequestCount: auxiliaries.length, auxiliaryIsolated: true, toolResultCorrelated: true, toolResultPayloadLength: continuation.toolResultPayloadLength, toolSchemaReused: true }, null, 2));
           NODE
 
       - name: Verify real DSH read_image upload
@@ -238,24 +206,10 @@ jobs:
           if (!(upload.contentLength > 0)) throw new Error('image upload body was empty');
           if (bootstrap.fileCount !== 0) throw new Error('BOOTSTRAP unexpectedly attached an image before read_image');
           if (continuation.fileCount !== 1) throw new Error(`TOOL_CONTINUE should carry one image, got ${continuation.fileCount}`);
-          if (!Array.isArray(continuation.fileIds) || continuation.fileIds[0] !== upload.id) {
-            throw new Error(`TOOL_CONTINUE did not reference uploaded image ${upload.id}`);
-          }
+          if (!Array.isArray(continuation.fileIds) || continuation.fileIds[0] !== upload.id) throw new Error(`TOOL_CONTINUE did not reference uploaded image ${upload.id}`);
           const file = continuation.body.files?.[0];
-          if (file?.type !== 'image' || file?.transfer_method !== 'local_file' || file?.upload_file_id !== upload.id) {
-            throw new Error('TOOL_CONTINUE did not use Dify local_file image protocol');
-          }
-          console.log(JSON.stringify({
-            result: 'PASS',
-            dshVersion: process.env.DSH_VERSION,
-            realDshReadImage: true,
-            uploadCount: uploads.length,
-            uploadId: upload.id,
-            bootstrapFileCount: bootstrap.fileCount,
-            continuationConversationId: continuation.body.conversation_id,
-            continuationFileCount: continuation.fileCount,
-            duplicateImageUpload: false,
-          }, null, 2));
+          if (file?.type !== 'image' || file?.transfer_method !== 'local_file' || file?.upload_file_id !== upload.id) throw new Error('TOOL_CONTINUE did not use Dify local_file image protocol');
+          console.log(JSON.stringify({ result: 'PASS', dshVersion: process.env.DSH_VERSION, realDshReadImage: true, uploadCount: uploads.length, uploadId: upload.id, bootstrapFileCount: bootstrap.fileCount, continuationConversationId: continuation.body.conversation_id, continuationFileCount: continuation.fileCount, duplicateImageUpload: false }, null, 2));
           NODE
 
       - name: Verify native decision telemetry
@@ -277,19 +231,13 @@ jobs:
           const main = events.find((x) => x.telemetry?.toolCount > 0 && x.telemetry?.contextWindow === 32768);
           if (!main) throw new Error('missing main native decision event with context profile');
           if (main.event?.decision?.compression !== 'none') throw new Error('native policy unexpectedly compressed a low-utilization request');
-          if (!Array.isArray(main.event?.decision?.reasonCodes) || !main.event.decision.reasonCodes.includes('client=dsh')) {
-            throw new Error('native decision reasonCodes missing client=dsh');
-          }
-          if (!main.event.decision.reasonCodes.some((code) => code.startsWith('context_utilization='))) {
-            throw new Error('native context utilization reasonCode missing');
-          }
+          if (!Array.isArray(main.event?.decision?.reasonCodes) || !main.event.decision.reasonCodes.includes('client=dsh')) throw new Error('native decision reasonCodes missing client=dsh');
+          if (!main.event.decision.reasonCodes.some((code) => code.startsWith('context_utilization='))) throw new Error('native context utilization reasonCode missing');
           if (!main.telemetry.sessionIdHash || main.telemetry.sessionIdHash.length !== 24) throw new Error('native session hash missing');
           if (!(main.telemetry.toolSchemaEstimatedTokens > 0)) throw new Error('native tool schema token estimate missing');
           if (main.telemetry.success !== true) throw new Error('native telemetry did not record success');
           if (output.includes('test-key')) throw new Error('native output leaked API key');
-          if (output.includes('Return the provider response. If a tool is requested, execute it and continue.')) {
-            throw new Error('native telemetry/output leaked complete task prompt');
-          }
+          if (output.includes('Return the provider response. If a tool is requested, execute it and continue.')) throw new Error('native telemetry/output leaked complete task prompt');
           console.log('REAL_NATIVE_DECISION_EVENT ' + JSON.stringify(main.event));
           console.log('REAL_NATIVE_TELEMETRY ' + JSON.stringify(main.telemetry));
           NODE
